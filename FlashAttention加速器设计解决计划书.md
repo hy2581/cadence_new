@@ -34,7 +34,7 @@
 
 | 指标 | 要求 |
 |---|---|
-| 主频 | 尽可能高（Cadence Genus 综合报告） |
+| 主频 | 尽可能高（Synopsys Design Compiler 综合报告） |
 | 面积 | 等效逻辑门 ≤ 200 万门 |
 | 延迟 | 单次 attention (s=256, d=64, causal) < 300k cycles |
 | 带宽 | 提供 RD/WR BYTES 统计与优化分析 |
@@ -458,63 +458,254 @@ Stage 3 (O Writeback):  idle         idle          [Q tile完成时写回]
 
 ---
 
-## 六、验证方案
+## 六、验证方案（SystemVerilog + UVM）
 
 ### 6.1 验证框架选择
 
-推荐采用 **Python + cocotb** 方案，原因：
-- 开发效率高，Python 生态可直接调用 NumPy 生成 golden 数据
-- cocotb 对 AXI 协议有成熟的验证 IP (cocotb-bus)
-- 方便进行大量随机测试
+采用 **SystemVerilog + UVM (Universal Verification Methodology)** 方案，原因：
+- 工业标准验证方法学，评审认可度最高
+- 可复用的组件化架构（Agent、Sequence、Scoreboard）
+- 强大的约束随机激励生成能力
+- 内建功能覆盖率与断言覆盖率机制
+- 使用 Synopsys VCS 进行编译和仿真
 
-备选方案：SystemVerilog + UVM（更贴近工业标准，适合有 UVM 经验的团队）。
-
-### 6.2 验证层次
+### 6.2 UVM 验证环境架构
 
 ```
-Level 0: 单元级验证
-├── exp_approx_unit_tb      // exp 近似精度验证
-├── reciprocal_unit_tb      // 倒数精度验证
-├── dot_product_tb          // 点积功能验证
-└── online_softmax_tb       // softmax 单行验证
-
-Level 1: 模块级验证
-├── compute_core_tb         // 完整计算核心（无 DMA）
-├── dma_engine_tb           // DMA 读写功能验证
-└── axi4_lite_reg_tb        // 寄存器读写验证
-
-Level 2: 系统级验证
-├── top_basic_tb            // 端到端基础功能
-├── top_causal_tb           // Causal mask 端到端
-├── top_random_tb           // 随机输入端到端
-└── top_corner_tb           // 边界条件测试
+fa_tb_top (顶层 testbench module)
+│
+├── flash_attention_top (DUT)
+│
+└── fa_test (UVM test)
+    └── fa_env (UVM environment)
+        │
+        ├── axi4_lite_agent (AXI4-Lite 主端 Agent)
+        │   ├── axi4_lite_driver        // 驱动寄存器读写
+        │   ├── axi4_lite_monitor        // 监控 AXI4-Lite 事务
+        │   └── axi4_lite_sequencer      // 序列调度器
+        │
+        ├── axi4_mem_agent (AXI4 从端 Agent — 模拟外部存储器)
+        │   ├── axi4_slave_driver        // 响应 DMA 读写请求
+        │   ├── axi4_slave_monitor       // 监控 AXI4 Master 事务
+        │   └── memory_model             // 内存模型 (存储 Q/K/V/O)
+        │
+        ├── fa_scoreboard (记分板)
+        │   ├── golden_model             // SV 实现的 FP32 参考模型
+        │   ├── result_checker           // 比较 DUT 输出与 golden
+        │   └── error_statistics         // 误差统计 (mean/max abs error)
+        │
+        ├── fa_coverage (功能覆盖率收集器)
+        │   ├── cfg_covergroup           // 配置空间覆盖
+        │   ├── data_covergroup          // 数据模式覆盖
+        │   └── fsm_covergroup           // 状态机转移覆盖
+        │
+        └── fa_virtual_sequencer         // 虚拟序列器，协调多个 Agent
 ```
 
-### 6.3 Golden Model
+### 6.3 UVM 关键组件详述
 
-使用 Python/NumPy 实现 FP32 精度的参考模型：
+#### 6.3.1 AXI4-Lite Agent
 
-```python
-def flash_attention_golden(Q, K, V, causal=True):
-    """FP32 golden reference"""
-    s, d = Q.shape
-    scale = 1.0 / math.sqrt(d)
-    S = Q @ K.T * scale
-    if causal:
-        mask = np.triu(np.ones((s, s), dtype=bool), k=1)
-        S[mask] = -1e9
-    P = softmax(S, axis=-1)
-    O = P @ V
-    return O
+实现 AXI4-Lite 主端接口，用于配置 DUT 寄存器并启动计算：
+
+- **Transaction 类 (`axi4_lite_txn`)**：包含地址、数据、读/写类型
+- **Driver**：将 transaction 转化为 AXI4-Lite 总线波形（AW/W/B 写通道，AR/R 读通道）
+- **Monitor**：采样总线信号，构建 transaction 发送给 scoreboard
+- **Sequence 库**：
+  - `reg_write_seq`：单寄存器写入
+  - `reg_read_seq`：单寄存器读取
+  - `fa_config_seq`：完整配置序列（写入所有基地址 + 参数 + 启动）
+  - `fa_poll_done_seq`：轮询 STATUS.DONE
+
+#### 6.3.2 AXI4 Memory Agent
+
+模拟外部存储器，响应 DUT 作为 AXI4 Master 发起的读写请求：
+
+- **Memory Model**：使用关联数组实现大地址空间存储，预加载 Q/K/V 数据
+- **Slave Driver**：按 AXI4 协议响应突发读写（支持 INCR/WRAP burst）
+- **Monitor**：记录所有 DMA 事务，用于带宽统计
+
+#### 6.3.3 Scoreboard
+
+核心验证逻辑：
+
+- 从 AXI4 Memory Agent Monitor 接收 DUT 写回的 O 矩阵数据
+- 调用 Golden Model 计算 FP32 参考结果
+- 将 DUT 的 Q8.8 输出转换为浮点数后与 golden 对比
+- 实时统计 mean_abs_error 和 max_abs_error
+- 在 `check_phase` 中判断是否通过误差门限
+
+#### 6.3.4 Golden Reference Model (SystemVerilog)
+
+在 scoreboard 内实现 FP32 精度的 SDPA 参考计算：
+
+```systemverilog
+function void compute_golden(
+    input  shortint Q[256][64],  // Q8.8 输入
+    input  shortint K[256][64],
+    input  shortint V[256][64],
+    input  bit      causal_en,
+    output shortint O[256][64]   // Q8.8 输出
+);
+    real q_f[256][64], k_f[256][64], v_f[256][64];
+    real s_f[256][256], p_f[256][256], o_f[256][64];
+    real scale = 1.0 / $sqrt(64.0);
+    real row_max, row_sum;
+
+    // Q8.8 → float
+    foreach (Q[i,j]) q_f[i][j] = real'(Q[i][j]) / 256.0;
+    foreach (K[i,j]) k_f[i][j] = real'(K[i][j]) / 256.0;
+    foreach (V[i,j]) v_f[i][j] = real'(V[i][j]) / 256.0;
+
+    // S = Q * K^T * scale, apply causal mask, softmax, O = P * V
+    for (int i = 0; i < 256; i++) begin
+        row_max = -1e30;
+        for (int j = 0; j < 256; j++) begin
+            s_f[i][j] = 0;
+            for (int k = 0; k < 64; k++)
+                s_f[i][j] += q_f[i][k] * k_f[j][k];
+            s_f[i][j] *= scale;
+            if (causal_en && j > i) s_f[i][j] = -1e9;
+            if (s_f[i][j] > row_max) row_max = s_f[i][j];
+        end
+        row_sum = 0;
+        for (int j = 0; j < 256; j++) begin
+            p_f[i][j] = $exp(s_f[i][j] - row_max);
+            row_sum += p_f[i][j];
+        end
+        for (int j = 0; j < 256; j++)
+            p_f[i][j] /= row_sum;
+        for (int j = 0; j < 64; j++) begin
+            o_f[i][j] = 0;
+            for (int k = 0; k < 256; k++)
+                o_f[i][j] += p_f[i][k] * v_f[k][j];
+            // float → Q8.8
+            O[i][j] = shortint'($rtoi(o_f[i][j] * 256.0));
+        end
+    end
+endfunction
 ```
 
-### 6.4 正确性验收标准
+### 6.4 UVM Test 与 Sequence 规划
+
+#### 测试基类
+
+```systemverilog
+class fa_base_test extends uvm_test;
+    fa_env env;
+
+    virtual function void build_phase(uvm_phase phase);
+        env = fa_env::type_id::create("env", this);
+    endfunction
+
+    virtual task configure_dut(
+        bit [63:0] q_base, k_base, v_base, o_base,
+        bit causal_en, bit [15:0] scale, neg_large
+    );
+        // 通过 axi4_lite_agent 写入所有寄存器
+    endtask
+endclass
+```
+
+#### 测试用例清单
+
+| 编号 | UVM Test 类名 | 说明 | 覆盖目标 |
+|---|---|---|---|
+| TC01 | `fa_zero_test` | Q=K=V=0 | 全零边界 |
+| TC02 | `fa_identity_test` | Q=K=I, V=I | softmax 行为验证 |
+| TC03 | `fa_random_nocausal_test` | 随机数据, CAUSAL_EN=0 | 基础功能 |
+| TC04 | `fa_random_causal_test` | 随机数据, CAUSAL_EN=1 | Causal mask 功能 |
+| TC05 | `fa_causal_row0_test` | Causal, 关注第 0 行输出 | 边界：仅看自身 |
+| TC06 | `fa_causal_lastrow_test` | Causal, 关注最后一行输出 | 边界：看所有 token |
+| TC07 | `fa_extreme_test` | Q8.8 极值 (±127.99) | 溢出/饱和处理 |
+| TC08 | `fa_consecutive_test` | 连续执行 2 次 | 状态复位 |
+| TC09 | `fa_reg_access_test` | 遍历所有寄存器读写 | 寄存器映射正确性 |
+| TC10 | `fa_soft_reset_test` | 运行中触发 SOFT_RESET | 复位恢复 |
+| TC11 | `fa_random_stress_test` | 100 组随机约束数据 | 误差统计分布 |
+| TC12 | `fa_error_inject_test` | 非法配置/地址 | STATUS.ERROR 行为 |
+
+#### 约束随机激励
+
+```systemverilog
+class fa_random_sequence extends uvm_sequence #(axi4_lite_txn);
+    rand bit [15:0] q_data[256][64];
+    rand bit [15:0] k_data[256][64];
+    rand bit [15:0] v_data[256][64];
+    rand bit        causal_en;
+
+    constraint data_range_c {
+        foreach (q_data[i,j]) q_data[i][j] inside {[16'hF000:16'h0FFF]};
+        foreach (k_data[i,j]) k_data[i][j] inside {[16'hF000:16'h0FFF]};
+        foreach (v_data[i,j]) v_data[i][j] inside {[16'hF000:16'h0FFF]};
+    }
+
+    constraint causal_dist_c {
+        causal_en dist {1 := 70, 0 := 30};
+    }
+
+    virtual task body();
+        // 1. 写入 Q/K/V 到 memory model
+        // 2. 配置 DUT 寄存器
+        // 3. 启动计算
+        // 4. 等待 DONE
+        // 5. 读出 O 供 scoreboard 检查
+    endtask
+endclass
+```
+
+### 6.5 功能覆盖率
+
+```systemverilog
+covergroup fa_func_cg;
+    causal_cp: coverpoint causal_en {
+        bins enabled  = {1};
+        bins disabled = {0};
+    }
+    data_pattern_cp: coverpoint data_pattern {
+        bins all_zero   = {ZERO};
+        bins all_max    = {MAX};
+        bins random_pos = {RAND_POS};
+        bins random_neg = {RAND_NEG};
+        bins mixed      = {MIXED};
+    }
+    query_row_cp: coverpoint query_row_idx {
+        bins first_row = {0};
+        bins last_row  = {255};
+        bins mid_rows  = {[1:254]};
+    }
+    cross causal_cp, data_pattern_cp;
+endgroup
+```
+
+### 6.6 正确性验收标准
 
 - **mean_abs_error** < 赛题规定门限（与 FP32 golden 对比）
 - **max_abs_error** < 赛题规定门限
+- **功能覆盖率** > 95%（所有 covergroup）
+- **代码覆盖率** > 95%（行/分支/条件/状态机/toggle）
 - 需在报告中分析误差来源（定点量化误差 + exp 近似误差 + 倒数近似误差）
 
-### 6.5 测试用例清单
+### 6.7 验证层次
+
+```
+Level 0: 单元级验证 (直接 SV testbench，非 UVM)
+├── exp_approx_unit_tb.sv     // exp 近似：LUT 精度逐值遍历
+├── reciprocal_unit_tb.sv     // 倒数：Newton-Raphson 收敛验证
+├── dot_product_tb.sv         // 点积：已知向量对比
+└── online_softmax_tb.sv      // softmax 单行数值对比
+
+Level 1: 模块级验证 (轻量 UVM)
+├── compute_core_env          // 计算核心端到端（直接喂数据，无 AXI）
+├── dma_engine_env            // DMA 突发读写功能
+└── axi4_lite_reg_env         // 寄存器读写遍历
+
+Level 2: 系统级验证 (完整 UVM 环境)
+├── fa_base_test              // 所有 TC01-TC12
+├── fa_regression             // 全回归测试
+└── fa_coverage_closure       // 覆盖率收敛补充测试
+```
+
+### 6.8 测试用例清单
 
 | 编号 | 测试用例 | 说明 |
 |---|---|---|
@@ -528,58 +719,140 @@ def flash_attention_golden(Q, K, V, causal=True):
 | TC08 | 多次连续执行 | 验证状态复位正确 |
 | TC09 | 寄存器读写 | AXI4-Lite 所有寄存器 |
 | TC10 | SOFT_RESET | 运行中复位，验证恢复 |
-| TC11 | 批量随机 (×100) | 100 组随机数据，统计误差分布 |
+| TC11 | 批量随机 (×100) | 100 组约束随机数据，统计误差分布 |
+| TC12 | 错误注入 | 非法配置，验证 ERROR 标志 |
 
 ---
 
-## 七、Cadence EDA 工具使用计划
+## 七、Synopsys EDA 工具使用计划
 
-### 7.1 设计流程
+### 7.1 工具环境
 
-```
-RTL 设计 (Verilog/SystemVerilog)
-       │
-       ▼
-功能仿真 (Xcelium)
-       │
-       ▼
-代码质量检查 (Jasper/HAL)
-       │
-       ▼
-RTL 功耗预估 (Joules RTL Design Studio)
-       │
-       ▼
-逻辑综合 (Genus)
-       │
-       ▼
-综合后仿真 (Xcelium + SDF)
-       │
-       ▼
-物理实现 (Innovus) [可选，加分]
-       │
-       ▼
-物理综合报告 (面积/时序/功耗)
-```
+使用 Docker 容器 `synopsys2016:0.0.0`，内含以下工具：
 
-### 7.2 工具对应关系
-
-| 阶段 | Cadence 工具 | 输出物 |
+| 工具 | 版本 | 路径 |
 |---|---|---|
-| RTL 仿真 | Xcelium | 仿真波形、覆盖率报告 |
-| RTL 功耗分析 | Joules RTL Design Studio | 等效逻辑门数、功耗报告 |
-| 逻辑综合 | Genus | 网表、时序报告、面积报告 |
-| 物理综合 | Genus (Physical Synthesis) | 物理感知网表 |
-| 布局布线 | Innovus | GDS、时序收敛报告 |
-| 形式验证 | Conformal | RTL-网表等价性 |
+| VCS | L-2016.06 | `/usr/synopsys/vcs-L-2016.06/` |
+| Design Compiler (dc_shell) | L-2016.03-SP1 | `/usr/synopsys/dc-L-2016.03-SP1/` |
+| PrimeTime (pt_shell) | M-2016.12-SP1 | `/usr/synopsys/pt-M-2016.12-SP1/` |
+| IC Compiler (icc_shell) | L-2016.03-SP1 | `/usr/synopsys/icc-L-2016.03-SP1/` |
+| Formality (fm_shell) | K-2015.06-SP4 | `/usr/synopsys/fm-K-2015.06-SP4/` |
+| Library Compiler (lc_shell) | M-2016.12 | `/usr/synopsys/lc-M-2016.12/` |
+| Verdi | L-2016.06-1 | `/usr/synopsys/verdi-L-2016.06-1/` |
 
-### 7.3 约束文件 (SDC)
+### 7.2 设计流程
 
-需要准备的关键约束：
-- 时钟定义（目标频率 500MHz+）
-- 输入/输出延迟约束
-- AXI 接口时序约束
-- 面积约束（max area）
-- 功耗约束
+```
+RTL 设计 (SystemVerilog)
+       │
+       ▼
+功能仿真 + UVM 验证 (VCS)
+       │
+       ▼
+代码/功能覆盖率分析 (VCS + URG)
+       │
+       ▼
+波形调试 (Verdi) [需 GUI 环境]
+       │
+       ▼
+逻辑综合 (Design Compiler / dc_shell)
+       │
+       ▼
+综合后仿真 (VCS + SDF back-annotation)
+       │
+       ▼
+时序分析 + 功耗分析 (PrimeTime / pt_shell)
+       │
+       ▼
+形式验证 (Formality / fm_shell)
+       │
+       ▼
+物理实现 (IC Compiler / icc_shell) [可选]
+       │
+       ▼
+最终报告 (面积/时序/功耗)
+```
+
+### 7.3 工具对应关系
+
+| 阶段 | Synopsys 工具 | 命令 | 输出物 |
+|---|---|---|---|
+| RTL 仿真 | VCS | `vcs -sverilog -ntb_opts uvm` | 仿真波形 (FSDB/VPD)、日志 |
+| UVM 验证 | VCS + UVM | `+UVM_TESTNAME=fa_xxx_test` | 测试结果、覆盖率数据库 |
+| 覆盖率分析 | VCS URG | `urg -dir simv.vdb` | 覆盖率报告 (HTML) |
+| 波形调试 | Verdi | `verdi -ssf wave.fsdb` | 交互式波形查看 |
+| 逻辑综合 | Design Compiler | `dc_shell -f run_dc.tcl` | 网表、面积/时序/功耗报告 |
+| 综合后仿真 | VCS + SDF | `vcs +sdfverbose` | 综合后时序验证 |
+| 静态时序分析 | PrimeTime | `pt_shell -f run_pt.tcl` | 时序报告、功耗报告 |
+| 形式验证 | Formality | `fm_shell -f run_fm.tcl` | RTL-网表等价性报告 |
+| 物理实现 | IC Compiler | `icc_shell -f run_icc.tcl` | GDS、布局布线报告 |
+
+### 7.4 VCS 编译与仿真命令
+
+```bash
+# RTL 编译 + UVM
+vcs -full64 -sverilog -ntb_opts uvm-1.2 \
+    -timescale=1ns/1ps \
+    -f filelist.f \
+    +incdir+./rtl/include \
+    +incdir+./tb/uvm_env \
+    -cm line+cond+fsm+tgl+branch \
+    -debug_access+all \
+    -l compile.log
+
+# 运行测试
+./simv +UVM_TESTNAME=fa_random_causal_test \
+       +UVM_VERBOSITY=UVM_MEDIUM \
+       -cm line+cond+fsm+tgl+branch \
+       +fsdbfile+wave.fsdb \
+       -l sim.log
+
+# 覆盖率合并与报告
+urg -dir simv.vdb -report urgReport
+```
+
+### 7.5 Design Compiler 综合脚本要点
+
+```tcl
+# run_dc.tcl 关键内容
+set target_library "your_target.db"
+set link_library   "* $target_library"
+
+read_sverilog -define SYNTHESIS [glob rtl/*.sv]
+current_design flash_attention_top
+
+source constraints/flash_attention.sdc
+
+compile_ultra -no_autoungroup
+# 或 compile_ultra -gate_clock 用于时钟门控优化
+
+report_area    -hierarchy > reports/area.rpt
+report_timing  -max_paths 10 > reports/timing.rpt
+report_power   > reports/power.rpt
+report_qor     > reports/qor.rpt
+
+write -format verilog -hierarchy -output netlist/fa_top_netlist.v
+write_sdc -nosplit netlist/fa_top.sdc
+write_sdf netlist/fa_top.sdf
+```
+
+### 7.6 约束文件 (SDC)
+
+```tcl
+# flash_attention.sdc
+create_clock -name clk -period 2.0 [get_ports clk]   ;# 500 MHz 目标
+set_clock_uncertainty 0.1 [get_clocks clk]
+
+set_input_delay  0.5 -clock clk [all_inputs]
+set_output_delay 0.5 -clock clk [all_outputs]
+
+set_max_area 0   ;# 让工具尽力优化面积
+set_max_fanout 32 [current_design]
+
+# AXI 接口约束
+set_input_delay  0.3 -clock clk [get_ports s_axi_*]
+set_output_delay 0.3 -clock clk [get_ports m_axi_*]
+```
 
 ---
 
@@ -598,32 +871,36 @@ RTL 功耗预估 (Joules RTL Design Studio)
 - 实现 compute_core（点积阵列 + online softmax + 输出累加器）
 - 实现 exp_approx_unit 和 reciprocal_unit
 - 实现 causal_mask_unit
-- 单元级 testbench 验证各子模块
-- **交付物**：核心计算模块 RTL + 单元 TB
+- 使用 VCS 编译并运行单元级 SV testbench 验证各子模块
+- **交付物**：核心计算模块 RTL + 单元 TB + VCS 仿真日志
 
-### 阶段三：接口与系统集成
+### 阶段三：UVM 验证环境搭建 + 接口集成
 
 - 实现 AXI4-Lite Slave 接口 + 寄存器文件
 - 实现 AXI4 Master 接口 + DMA 引擎
 - 实现 tile_controller 和主 FSM
 - 实现 buffer_system（含双缓冲）
-- 顶层集成与系统级 testbench
-- **交付物**：完整 RTL + 系统 TB
+- 搭建完整 UVM 验证环境（Agent / Scoreboard / Coverage）
+- 顶层集成与系统级 UVM 测试
+- **交付物**：完整 RTL + UVM 验证环境
 
-### 阶段四：验证与调试
+### 阶段四：UVM 验证与调试
 
-- 完成所有测试用例（TC01-TC11）
-- 修复功能 bug，调优精度
-- 完成覆盖率分析（行/分支/状态机覆盖率 > 95%）
-- **交付物**：验证报告、覆盖率报告
+- 使用 VCS + UVM 运行所有测试用例（TC01-TC12）
+- 修复功能 bug，调优定点精度
+- 使用 VCS URG 分析覆盖率（代码覆盖率 + 功能覆盖率 > 95%）
+- 补充约束随机测试驱动覆盖率收敛
+- **交付物**：UVM 验证报告、URG 覆盖率报告
 
 ### 阶段五：综合与优化
 
-- 使用 Genus 进行逻辑综合
-- 使用 Joules 进行 RTL 功耗/面积分析
-- 时序优化（关键路径优化）
+- 使用 Design Compiler (dc_shell) 进行逻辑综合
+- 使用 PrimeTime (pt_shell) 进行静态时序分析和功耗分析
+- 使用 Formality (fm_shell) 进行 RTL-网表形式验证
+- 时序优化（关键路径优化、插入流水寄存器）
 - 面积优化（资源复用、存储优化）
-- **交付物**：综合报告（面积、时序、功耗）
+- 使用 VCS 进行综合后仿真（SDF back-annotation）
+- **交付物**：综合报告（面积、时序、功耗）、网表、SDF
 
 ### 阶段六：文档与提交
 
@@ -662,7 +939,7 @@ RTL 功耗预估 (Joules RTL Design Studio)
 |---|---|---|
 | 定点 exp 近似精度不足 | 输出误差超限 | 增加 LUT 深度；使用分段多项式近似；增大中间位宽 |
 | 面积超标 | 不满足 ≤200 万门 | 减少并行度（MAC 数量）；使用时间复用；优化 buffer 大小 |
-| 时序不收敛 | 主频低 | 增加流水级数；优化关键路径（乘法器后加寄存器）；使用 Genus 增量优化 |
+| 时序不收敛 | 主频低 | 增加流水级数；优化关键路径（乘法器后加寄存器）；使用 DC compile_ultra 增量优化 |
 | DMA 带宽瓶颈 | 实际周期数超标 | 增大 AXI 数据宽度；优化突发长度；增加 K/V 片上缓存 |
 | Causal mask 边界错误 | 功能 bug | 全面的 corner case 测试；形式验证关键属性 |
 | 在线 softmax 数值溢出 | 计算错误 | 使用 40-bit+ 累加；分段缩放策略；溢出检测与饱和逻辑 |
@@ -675,8 +952,8 @@ RTL 功耗预估 (Joules RTL Design Studio)
 
 ```
 submission/
-├── rtl/                          // RTL 源代码
-│   ├── flash_attention_top.sv    // 顶层模块
+├── rtl/                              // RTL 源代码 (SystemVerilog)
+│   ├── flash_attention_top.sv        // 顶层模块
 │   ├── axi4_lite_slave.sv
 │   ├── axi4_master_if.sv
 │   ├── dma_engine.sv
@@ -689,32 +966,68 @@ submission/
 │   ├── reciprocal_unit.sv
 │   ├── output_accumulator.sv
 │   ├── causal_mask_unit.sv
-│   └── include/                  // 参数定义头文件
+│   └── include/                      // 参数定义头文件
 │       └── fa_params.svh
-├── tb/                           // 验证代码
-│   ├── cocotb/                   // cocotb 验证环境
-│   │   ├── test_basic.py
-│   │   ├── test_causal.py
-│   │   ├── test_random.py
-│   │   ├── test_corner.py
-│   │   ├── test_axi_reg.py
-│   │   ├── golden_model.py
-│   │   └── axi_driver.py
-│   └── Makefile
-├── constraints/                  // 约束文件
+├── tb/                               // UVM 验证代码
+│   ├── tb_top/
+│   │   └── fa_tb_top.sv              // 顶层 testbench module
+│   ├── uvm_env/
+│   │   ├── fa_env.sv                 // UVM environment
+│   │   ├── fa_env_pkg.sv             // 环境 package
+│   │   ├── fa_scoreboard.sv          // Scoreboard + Golden Model
+│   │   ├── fa_coverage.sv            // 功能覆盖率收集器
+│   │   └── fa_virtual_sequencer.sv   // 虚拟序列器
+│   ├── agents/
+│   │   ├── axi4_lite_agent/          // AXI4-Lite Master Agent
+│   │   │   ├── axi4_lite_txn.sv
+│   │   │   ├── axi4_lite_driver.sv
+│   │   │   ├── axi4_lite_monitor.sv
+│   │   │   ├── axi4_lite_sequencer.sv
+│   │   │   └── axi4_lite_agent.sv
+│   │   └── axi4_mem_agent/           // AXI4 Slave Memory Agent
+│   │       ├── axi4_slave_driver.sv
+│   │       ├── axi4_slave_monitor.sv
+│   │       ├── memory_model.sv
+│   │       └── axi4_mem_agent.sv
+│   ├── sequences/
+│   │   ├── fa_base_sequence.sv
+│   │   ├── fa_config_seq.sv
+│   │   ├── fa_random_seq.sv
+│   │   └── fa_stress_seq.sv
+│   ├── tests/
+│   │   ├── fa_base_test.sv
+│   │   ├── fa_zero_test.sv
+│   │   ├── fa_random_causal_test.sv
+│   │   ├── fa_random_nocausal_test.sv
+│   │   ├── fa_extreme_test.sv
+│   │   ├── fa_reg_access_test.sv
+│   │   ├── fa_consecutive_test.sv
+│   │   ├── fa_soft_reset_test.sv
+│   │   └── fa_random_stress_test.sv
+│   └── unit_tb/                      // 单元级 testbench (非 UVM)
+│       ├── exp_approx_unit_tb.sv
+│       ├── reciprocal_unit_tb.sv
+│       ├── dot_product_tb.sv
+│       └── online_softmax_tb.sv
+├── constraints/                      // 约束文件
 │   └── flash_attention.sdc
-├── scripts/                      // Cadence 工具脚本
-│   ├── run_sim.tcl               // Xcelium 仿真脚本
-│   ├── run_genus.tcl             // Genus 综合脚本
-│   ├── run_joules.tcl            // Joules 功耗分析脚本
-│   └── run_innovus.tcl           // Innovus P&R 脚本（可选）
-├── reports/                      // 工具生成报告
-│   ├── sim_report/
-│   ├── synthesis_report/
-│   └── power_report/
-├── docs/                         // 设计文档
+├── scripts/                          // Synopsys 工具脚本
+│   ├── run_vcs.sh                    // VCS 编译 + 仿真脚本
+│   ├── run_regression.sh             // 全回归测试脚本
+│   ├── run_dc.tcl                    // Design Compiler 综合脚本
+│   ├── run_pt.tcl                    // PrimeTime 时序/功耗脚本
+│   ├── run_fm.tcl                    // Formality 形式验证脚本
+│   └── run_icc.tcl                   // IC Compiler P&R 脚本（可选）
+├── filelist.f                        // RTL + TB 文件列表
+├── reports/                          // 工具生成报告
+│   ├── vcs_sim/                      // VCS 仿真日志
+│   ├── urg_coverage/                 // URG 覆盖率报告
+│   ├── dc_synthesis/                 // DC 综合报告 (面积/时序/功耗)
+│   ├── pt_timing/                    // PT 时序报告
+│   └── fm_verify/                    // Formality 验证报告
+├── docs/                             // 设计文档
 │   └── design_report.pdf
-└── bonus/                        // 加分项独立版本
+└── bonus/                            // 加分项独立版本
     ├── rtl/
     ├── tb/
     └── reports/
@@ -729,5 +1042,5 @@ submission/
 1. **算法层面**：采用 Online Softmax + Tiling 的 FlashAttention 经典范式，在不存储完整注意力矩阵的前提下完成等价 SDPA 计算
 2. **架构层面**：模块化设计，计算核心（点积阵列 + softmax + 累加器）+ DMA 引擎 + AXI 接口，支持双缓冲流水线
 3. **性能层面**：预估约 210k cycles 完成单次 attention，满足 < 300k 要求；面积约 115 万门，满足 ≤ 200 万门约束
-4. **验证层面**：采用 cocotb 框架进行多层次验证，覆盖功能正确性、精度验收、边界条件
-5. **工具链**：充分利用 Cadence Xcelium/Genus/Joules 工具完成仿真、综合和功耗分析
+4. **验证层面**：采用 SystemVerilog + UVM 方法学进行三级验证（单元/模块/系统），包含完整的 Agent、Scoreboard、Coverage 架构，12 项测试用例覆盖功能正确性、精度验收、边界条件、错误注入
+5. **工具链**：使用 Synopsys 2016 全套工具链 — VCS（仿真）、Design Compiler（综合）、PrimeTime（时序/功耗分析）、Formality（形式验证）、IC Compiler（物理实现）
