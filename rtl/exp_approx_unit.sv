@@ -24,8 +24,6 @@ module exp_approx_unit #(
     // step = 20.0/1024 ≈ 0.01953125
     // index = (x_real + 16.0) / 0.01953125 = (x_real + 16.0) * 51.2
     localparam LUT_SIZE = 1024;
-    wire [OUT_WIDTH-1:0] lut_rom_data;
-    exp_lut_rom u_lut_rom (.addr(idx_p1), .data(lut_rom_data));
 
     // Stage 1: convert x_in to LUT index (combinational prep + register)
     logic valid_p1;
@@ -64,6 +62,10 @@ module exp_approx_unit #(
             end
         end
     end
+
+    // LUT ROM instance (after idx_p1 declaration)
+    wire [OUT_WIDTH-1:0] lut_rom_data;
+    exp_lut_rom u_lut_rom (.addr(idx_p1), .data(lut_rom_data));
 
     // Stage 2: LUT read (combinational read, then register)
     logic valid_p2;

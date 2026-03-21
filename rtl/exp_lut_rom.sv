@@ -35,17 +35,19 @@ module exp_lut_rom (
     end
 `else
     // Simulation: use initial block for accurate values
-    reg [23:0] lut_mem [0:1023];
+    logic [23:0] lut_mem [0:1023];
     integer _i;
     real _x, _e;
+    integer _iv;
     initial begin
         for (_i = 0; _i < 1024; _i = _i + 1) begin
             _x = -16.0 + ($itor(_i) * 20.0 / 1024.0);
             _e = $exp(_x);
-            if (_e * 65536.0 > 16777215.0)
+            _iv = $rtoi(_e * 65536.0);
+            if (_iv > 16777215)
                 lut_mem[_i] = 24'hFFFFFF;
             else
-                lut_mem[_i] = $rtoi(_e * 65536.0);
+                lut_mem[_i] = _iv[23:0];
         end
     end
     assign data = lut_mem[addr];
