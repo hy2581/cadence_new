@@ -112,27 +112,33 @@ module axi4_slave_mem (
                 RD_DATA: begin
                     arready <= 1'b0;
 
-                    // Drive read data
-                    if (!rvalid || (rvalid && rready)) begin
+                    if (!rvalid) begin
+                        // Present new data
                         integer b, beat_bytes;
                         beat_bytes = 1 << rd_size;
-                        for (b = 0; b < 16; b = b + 1) begin
-                            if (b < beat_bytes)
-                                rdata[b*8 +: 8] <= mem.exists(rd_addr + b) ? mem[rd_addr + b] : 8'h0;
-                            else
-                                rdata[b*8 +: 8] <= 8'h0;
-                        end
+                        for (b = 0; b < 16; b = b + 1)
+                            rdata[b*8 +: 8] <= (b < beat_bytes && mem.exists(rd_addr + b)) ?
+                                                mem[rd_addr + b] : 8'h0;
                         rvalid <= 1'b1;
                         rlast  <= (rd_cnt == rd_len - 1);
-
-                        if (rvalid && rready) begin
+                    end else if (rvalid && rready) begin
+                        // Beat accepted
+                        rd_cnt <= rd_cnt + 1;
+                        if (rlast) begin
+                            // Transfer complete
+                            rvalid <= 1'b0;
+                            rlast  <= 1'b0;
+                            rd_fsm <= RD_IDLE;
+                        end else begin
+                            // Advance to next beat
+                            integer b2, beat_bytes2;
+                            beat_bytes2 = 1 << rd_size;
                             rd_addr <= rd_addr + (64'd1 << rd_size);
-                            rd_cnt  <= rd_cnt + 1;
-                            if (rd_cnt == rd_len - 1) begin
-                                rvalid <= 1'b0;
-                                rlast  <= 1'b0;
-                                rd_fsm <= RD_IDLE;
-                            end
+                            for (b2 = 0; b2 < 16; b2 = b2 + 1)
+                                rdata[b2*8 +: 8] <= (b2 < beat_bytes2 &&
+                                    mem.exists(rd_addr + (64'd1 << rd_size) + b2)) ?
+                                    mem[rd_addr + (64'd1 << rd_size) + b2] : 8'h0;
+                            rlast <= (rd_cnt + 1 == rd_len - 1);
                         end
                     end
                 end

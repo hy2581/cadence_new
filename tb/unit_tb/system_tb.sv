@@ -222,6 +222,23 @@ module system_tb;
         $display("[4] Starting...");
         axil_write(8'h00, 32'h0000_0001);
 
+        // Debug: monitor compute
+        fork
+            begin
+                integer dbg_i;
+                for (dbg_i = 0; dbg_i < 2000; dbg_i = dbg_i + 1) begin
+                    @(posedge clk);
+                    if (dut.tc_compute_start)
+                        $display("  DBG: compute_start at +%0d", dbg_i);
+                    if (dut.tc_compute_done)
+                        $display("  DBG: compute_done at +%0d", dbg_i);
+                end
+                $display("  DBG: compute state=%0d busy=%b dp_start=%b dp_done=%b dp_busy=%b",
+                    dut.u_compute.state, dut.u_compute.busy,
+                    dut.u_compute.dp_start, dut.u_compute.dp_done, dut.u_compute.dp_busy);
+            end
+        join_none
+
         // Step 5: Wait for DONE
         $display("[5] Polling DONE...");
         timeout_cnt = 0;
