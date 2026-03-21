@@ -177,8 +177,6 @@ module flash_attention_top (
     logic signed [DATA_WIDTH-1:0] comp_o_tile [TILE_BR-1:0][HEAD_DIM-1:0];
     logic       comp_o_valid;
 
-    localparam PAR_MACS = 8;
-
     buffer_system #(
         .TILE_BR(TILE_BR), .TILE_BC(TILE_BC), .HEAD_DIM(HEAD_DIM),
         .DATA_WIDTH(DATA_WIDTH), .PAR_MACS(PAR_MACS), .AXI_DATA_WIDTH(AXI_DATA_WIDTH)

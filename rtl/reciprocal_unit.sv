@@ -23,10 +23,10 @@ module reciprocal_unit #(
     localparam LUT_DEPTH = 256;
     logic [WIDTH-1:0] recip_lut [0:LUT_DEPTH-1];
 
+    integer _ri;
     initial begin
-        for (int i = 0; i < LUT_DEPTH; i++) begin
-            real x_norm = 0.5 + (real'(i) / real'(LUT_DEPTH)) * 0.5;
-            recip_lut[i] = WIDTH'(int'((1.0 / x_norm) * (2.0 ** FRAC_BITS) + 0.5));
+        for (_ri = 0; _ri < LUT_DEPTH; _ri = _ri + 1) begin
+            recip_lut[_ri] = WIDTH'(int'((1.0 / (0.5 + (real'(_ri) / real'(LUT_DEPTH)) * 0.5)) * (2.0 ** FRAC_BITS) + 0.5));
         end
     end
 

@@ -55,10 +55,10 @@ module exp_approx_unit #(
     // Exp2 LUT: stores 2^(frac/256) * 65536 for frac in [0, 255]
     logic [15:0] exp2_lut [0:255];
 
+    integer _ei;
     initial begin
-        for (int i = 0; i < 256; i++) begin
-            real frac_val = real'(i) / 256.0;
-            exp2_lut[i] = 16'(int'((2.0 ** frac_val) * (2.0 ** FRAC_OUT) + 0.5));
+        for (_ei = 0; _ei < 256; _ei = _ei + 1) begin
+            exp2_lut[_ei] = 16'(int'((2.0 ** (real'(_ei) / 256.0)) * (2.0 ** FRAC_OUT) + 0.5));
         end
     end
 

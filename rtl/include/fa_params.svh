@@ -69,6 +69,9 @@ parameter DEFAULT_STRIDE  = HEAD_DIM * 2;           // d * sizeof(Q8.8)
 parameter DEFAULT_NEG_LARGE = 16'h8000;             // -128.0 in Q8.8
 parameter DEFAULT_SCALE   = 16'h0020;               // 1/8 ≈ 1/√64 in Q8.8
 
+// --- Parallelism ---
+parameter PAR_MACS       = 8;     // parallel MACs per dot-product per cycle
+
 // --- Exp LUT ---
 parameter EXP_LUT_DEPTH  = 256;
 parameter EXP_LUT_WIDTH  = 16;
