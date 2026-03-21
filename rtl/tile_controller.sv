@@ -179,14 +179,18 @@ module tile_controller #(
                 end
 
                 ST_WRITE_O: begin
+                    dma_wr_req       <= 1'b1;
+                    dma_wr_addr      <= o_base_addr + AXI_ADDR_WIDTH'(q_idx) * AXI_ADDR_WIDTH'(stride_bytes) * TILE_BR;
+                    dma_wr_len_bytes <= O_TILE_BYTES;
                     o_writeback_start <= 1'b1;
-                    // Skip DMA write for now — O data is in buffer_system
-                    // TB will read directly from buffer
-                    state <= ST_NEXT_Q;
+                    state            <= ST_WAIT_O;
                 end
 
                 ST_WAIT_O: begin
-                    state <= ST_NEXT_Q;
+                    if (dma_wr_done) begin
+                        dma_wr_req <= 1'b0;
+                        state <= ST_NEXT_Q;
+                    end
                 end
 
                 ST_NEXT_Q: begin

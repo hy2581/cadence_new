@@ -219,48 +219,39 @@ module dma_engine #(
                         axi_wr_len  <= dma_wr_len_bytes;
                         wr_beat_cnt <= '0;
                         wr_state    <= WR_ADDR;
-                        // Start reading first buffer beat
-                        buf_o_rd_en      <= 1'b1;
-                        buf_o_rd_row     <= '0;
-                        buf_o_rd_col_grp <= '0;
                     end
                 end
 
                 WR_ADDR: begin
-                    // Wait until AXI master gives data_ready (after AW accepted by slave)
-                    if (axi_wr_data_ready) begin
-                        // Send first beat (data was pre-read)
-                        axi_wr_data       <= buf_o_rd_data;
-                        axi_wr_data_valid <= 1'b1;
-                        wr_beat_cnt       <= wr_beat_cnt + 1;
-                        // Pre-read next
-                        if (wr_beat_cnt < O_TOTAL_BEATS - 1) begin
-                            buf_o_rd_en      <= 1'b1;
-                            buf_o_rd_row     <= 16'(wr_beat_cnt + 1) / O_BEATS_PER_ROW;
-                            buf_o_rd_col_grp <= 16'(wr_beat_cnt + 1) % O_BEATS_PER_ROW;
-                        end
+                    // Setup first read address
+                    buf_o_rd_en      <= 1'b1;
+                    buf_o_rd_row     <= '0;
+                    buf_o_rd_col_grp <= '0;
+                    if (axi_wr_data_ready)
                         wr_state <= WR_DATA;
-                    end
                 end
 
                 WR_DATA: begin
-                    if (axi_wr_data_ready) begin
-                        axi_wr_data       <= buf_o_rd_data;
-                        axi_wr_data_valid <= 1'b1;
-                        wr_beat_cnt       <= wr_beat_cnt + 1;
+                    // buf_o_rd_data is combinationally valid from previous cycle's address
+                    axi_wr_data       <= buf_o_rd_data;
+                    axi_wr_data_valid <= 1'b1;
+                    wr_beat_cnt       <= wr_beat_cnt + 1;
 
-                        if (wr_beat_cnt < O_TOTAL_BEATS - 1) begin
-                            buf_o_rd_en      <= 1'b1;
-                            buf_o_rd_row     <= 16'(wr_beat_cnt + 1) / O_BEATS_PER_ROW;
-                            buf_o_rd_col_grp <= 16'(wr_beat_cnt + 1) % O_BEATS_PER_ROW;
-                        end
-
-                        if (wr_beat_cnt == O_TOTAL_BEATS - 1)
-                            wr_state <= WR_FINISH;
+                    // Setup next read
+                    if (wr_beat_cnt + 1 < O_TOTAL_BEATS) begin
+                        buf_o_rd_en      <= 1'b1;
+                        buf_o_rd_row     <= (wr_beat_cnt + 1) / O_BEATS_PER_ROW;
+                        buf_o_rd_col_grp <= (wr_beat_cnt + 1) % O_BEATS_PER_ROW;
+                    end else begin
+                        buf_o_rd_en <= 1'b0;
                     end
+
+                    if (wr_beat_cnt == O_TOTAL_BEATS - 1)
+                        wr_state <= WR_FINISH;
                 end
 
                 WR_FINISH: begin
+                    axi_wr_data_valid <= 1'b0;
                     if (axi_wr_done) begin
                         dma_wr_done <= 1'b1;
                         axi_wr_req  <= 1'b0;

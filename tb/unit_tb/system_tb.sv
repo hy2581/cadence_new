@@ -268,18 +268,18 @@ module system_tb;
         axil_read(8'h40, cycles_val);
         $display("  DONE! Cycles: %0d", cycles_val);
 
-        // Step 6: Read O from buffer (last tile's O data)
-        // Note: buffer only holds the last Q-tile's O (B_r rows).
-        // For full validation, we'd need DMA write-back. For now validate last tile.
-        $display("[6] Reading O from DUT buffer (last Q-tile)...");
+        // Step 6: Read O from external memory (full 256 rows via DMA write-back)
+        $display("[6] Reading O from memory (full 256x64)...");
         mean_err = 0; max_err = 0; err_count = 0;
-        // Read O for all 256 rows - since we skip DMA write,
-        // just check that DUT computed something and report
-        // TODO: implement full DMA write-back for complete validation
-        // For now, just check last tile (rows 252-255)
-        for (i = 252; i < 256; i = i + 1) begin
+        for (i = 0; i < 256; i = i + 1) begin
             for (j = 0; j < 64; j = j + 1) begin
-                o_val = dut.u_buffers.o_mem[i-252][j];
+                mem_rd_en = 1;
+                mem_rd_addr = O_BASE + (i*64+j)*2;
+                @(posedge clk);
+                o_val = mem_rd_data16;
+                mem_rd_en = 0;
+                @(posedge clk);
+
                 dut_val = $itor(o_val) / 256.0;
                 gold_val = golden_o[i][j];
                 abs_err = dut_val - gold_val;
