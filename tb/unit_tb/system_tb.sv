@@ -107,106 +107,95 @@ module system_tb;
         end
     end
 
-    reg [63:0]  rd_addr_q;
-    reg [7:0]   rd_len_q;
-    reg [2:0]   rd_size_q;
-    reg         rd_active;
-    reg [7:0]   rd_cnt;
-
+    // AXI4 Read Slave — Task-based (procedural, clear timing)
     initial begin
         m_axi_arready = 0; m_axi_rvalid = 0; m_axi_rlast = 0;
         m_axi_rdata = 0; m_axi_rid = 0; m_axi_rresp = 0;
-        rd_active = 0; rd_cnt = 0;
-    end
+        forever begin
+            // Wait for read address
+            @(posedge clk);
+            while (!m_axi_arvalid) @(posedge clk);
 
-    always @(posedge clk) begin
-        if (rst_n) begin
-            if (!rd_active && m_axi_arvalid) begin
-                m_axi_arready <= 1;
-                rd_addr_q <= m_axi_araddr;
-                rd_len_q  <= m_axi_arlen;
-                rd_size_q <= m_axi_arsize;
-                rd_active <= 1;
-                rd_cnt    <= 0;
-            end else begin
-                m_axi_arready <= 0;
-            end
+            // Accept address
+            begin
+                reg [63:0] addr;
+                reg [7:0] len;
+                reg [2:0] sz;
+                integer beat_bytes, b, cnt;
+                addr = m_axi_araddr;
+                len  = m_axi_arlen;
+                sz   = m_axi_arsize;
+                beat_bytes = 1 << sz;
+                m_axi_arready = 1;
+                @(posedge clk);
+                m_axi_arready = 0;
 
-            if (rd_active) begin
-                integer beat_bytes, b;
-                beat_bytes = 1 << rd_size_q;
-                for (b = 0; b < 16; b = b + 1) begin
-                    if (b < beat_bytes)
-                        m_axi_rdata[b*8 +: 8] <= mem.exists(rd_addr_q + b) ? mem[rd_addr_q + b] : 8'h0;
-                    else
-                        m_axi_rdata[b*8 +: 8] <= 8'h0;
-                end
-                m_axi_rvalid <= 1;
-                m_axi_rid    <= m_axi_arid;
-                m_axi_rresp  <= 2'b00;
-                m_axi_rlast  <= (rd_cnt == rd_len_q);
-
-                if (m_axi_rvalid && m_axi_rready) begin
-                    if (rd_cnt == rd_len_q) begin
-                        rd_active    <= 0;
-                        m_axi_rvalid <= 0;
-                        m_axi_rlast  <= 0;
-                    end else begin
-                        rd_addr_q <= rd_addr_q + (1 << rd_size_q);
-                        rd_cnt    <= rd_cnt + 1;
+                // Send data beats
+                for (cnt = 0; cnt <= len; cnt = cnt + 1) begin
+                    for (b = 0; b < 16; b = b + 1) begin
+                        if (b < beat_bytes)
+                            m_axi_rdata[b*8 +: 8] = mem.exists(addr + b) ? mem[addr + b] : 8'h0;
+                        else
+                            m_axi_rdata[b*8 +: 8] = 8'h0;
                     end
+                    m_axi_rvalid = 1;
+                    m_axi_rlast  = (cnt == len);
+                    m_axi_rresp  = 2'b00;
+                    @(posedge clk);
+                    while (!m_axi_rready) @(posedge clk);
+                    addr = addr + beat_bytes;
                 end
+                m_axi_rvalid = 0;
+                m_axi_rlast  = 0;
             end
         end
     end
 
-    // AXI4 Write Slave
-    reg [63:0]  wr_addr_q;
-    reg [7:0]   wr_len_q;
-    reg [2:0]   wr_size_q;
-    reg         wr_active;
-    reg [7:0]   wr_cnt;
-
+    // AXI4 Write Slave — Task-based (procedural)
     initial begin
         m_axi_awready = 0; m_axi_wready = 0;
         m_axi_bvalid = 0; m_axi_bid = 0; m_axi_bresp = 0;
-        wr_active = 0; wr_cnt = 0;
-    end
+        forever begin
+            @(posedge clk);
+            while (!m_axi_awvalid) @(posedge clk);
 
-    always @(posedge clk) begin
-        if (rst_n) begin
-            if (!wr_active && m_axi_awvalid) begin
-                m_axi_awready <= 1;
-                wr_addr_q <= m_axi_awaddr;
-                wr_len_q  <= m_axi_awlen;
-                wr_size_q <= m_axi_awsize;
-                wr_active <= 1;
-                wr_cnt    <= 0;
-                m_axi_wready <= 1;
-            end else begin
-                m_axi_awready <= 0;
-            end
-
-            if (wr_active && m_axi_wvalid && m_axi_wready) begin
+            begin
+                reg [63:0] addr;
+                reg [7:0] len;
+                reg [2:0] sz;
                 integer beat_bytes, b;
-                beat_bytes = 1 << wr_size_q;
-                for (b = 0; b < beat_bytes; b = b + 1) begin
-                    if (m_axi_wstrb[b])
-                        mem[wr_addr_q + b] = m_axi_wdata[b*8 +: 8];
-                end
-                wr_addr_q <= wr_addr_q + beat_bytes;
-                wr_cnt <= wr_cnt + 1;
+                addr = m_axi_awaddr;
+                len  = m_axi_awlen;
+                sz   = m_axi_awsize;
+                beat_bytes = 1 << sz;
+                m_axi_awready = 1;
+                @(posedge clk);
+                m_axi_awready = 0;
 
-                if (m_axi_wlast) begin
-                    wr_active <= 0;
-                    m_axi_wready <= 0;
-                    m_axi_bvalid <= 1;
-                    m_axi_bresp  <= 2'b00;
+                // Accept write data beats
+                m_axi_wready = 1;
+                begin : wr_loop
+                    reg wr_done_flag;
+                    wr_done_flag = 0;
+                    while (!wr_done_flag) begin
+                        @(posedge clk);
+                        if (m_axi_wvalid) begin
+                            for (b = 0; b < beat_bytes; b = b + 1)
+                                if (m_axi_wstrb[b])
+                                    mem[addr + b] = m_axi_wdata[b*8 +: 8];
+                            addr = addr + beat_bytes;
+                            if (m_axi_wlast)
+                                wr_done_flag = 1;
+                        end
+                    end
                 end
+                m_axi_wready = 0;
+                m_axi_bvalid = 1;
+                m_axi_bresp  = 2'b00;
+                @(posedge clk);
+                while (!m_axi_bready) @(posedge clk);
+                m_axi_bvalid = 0;
             end
-
-            if (m_axi_bvalid && m_axi_bready)
-                m_axi_bvalid <= 0;
         end
     end
 
@@ -364,6 +353,21 @@ module system_tb;
         // Step 4: Start
         $display("[4] Starting computation...");
         axil_write(8'h00, 32'h0000_0001);   // CTRL: START
+
+        // Debug: monitor key internal signals for first 200 cycles
+        repeat(200) begin
+            @(posedge clk);
+            if ($time < 1100000)  // only first 200 cycles after start
+                $display("t=%0t tc_state=%0d dma_rd_req=%b dma_rd_done=%b axi_ar_valid=%b axi_ar_ready=%b axi_r_valid=%b busy=%b",
+                    $time,
+                    dut.u_tile_ctrl.state,
+                    dut.tc_dma_rd_req,
+                    dut.tc_dma_rd_done,
+                    dut.m_axi_arvalid,
+                    m_axi_arready,
+                    m_axi_rvalid,
+                    dut.u_tile_ctrl.busy);
+        end
 
         // Step 5: Poll STATUS.DONE
         $display("[5] Waiting for DONE...");
