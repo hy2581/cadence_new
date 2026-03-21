@@ -187,8 +187,8 @@ module tile_controller #(
                 end
 
                 ST_WAIT_O: begin
-                    dma_wr_req <= 1'b0;
                     if (dma_wr_done) begin
+                        dma_wr_req <= 1'b0;
                         state <= ST_NEXT_Q;
                     end
                 end
