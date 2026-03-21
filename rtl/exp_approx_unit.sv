@@ -24,22 +24,8 @@ module exp_approx_unit #(
     // step = 20.0/1024 ≈ 0.01953125
     // index = (x_real + 16.0) / 0.01953125 = (x_real + 16.0) * 51.2
     localparam LUT_SIZE = 1024;
-    reg [OUT_WIDTH-1:0] exp_lut [0:LUT_SIZE-1];
-
-    integer _i;
-    real _x_val, _e_val;
-    integer _i_val;
-    initial begin
-        for (_i = 0; _i < LUT_SIZE; _i = _i + 1) begin
-            _x_val = -16.0 + ($itor(_i) * 20.0 / 1024.0);
-            _e_val = $exp(_x_val);
-            _i_val = $rtoi(_e_val * 65536.0);
-            if (_i_val > ((1 << OUT_WIDTH) - 1))
-                exp_lut[_i] = {OUT_WIDTH{1'b1}};
-            else
-                exp_lut[_i] = _i_val[OUT_WIDTH-1:0];
-        end
-    end
+    wire [OUT_WIDTH-1:0] lut_rom_data;
+    exp_lut_rom u_lut_rom (.addr(idx_p1), .data(lut_rom_data));
 
     // Stage 1: convert x_in to LUT index (combinational prep + register)
     logic valid_p1;
@@ -84,7 +70,7 @@ module exp_approx_unit #(
     logic [OUT_WIDTH-1:0] lut_val_p2;
     logic clamp_low_p2, clamp_high_p2;
 
-    wire [OUT_WIDTH-1:0] lut_rd_val = exp_lut[idx_p1];
+    wire [OUT_WIDTH-1:0] lut_rd_val = lut_rom_data;
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
