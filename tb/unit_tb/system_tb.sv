@@ -233,9 +233,12 @@ module system_tb;
                     if (dut.tc_compute_done)
                         $display("  DBG: compute_done at +%0d", dbg_i);
                 end
-                $display("  DBG: compute state=%0d busy=%b dp_start=%b dp_done=%b dp_busy=%b",
-                    dut.u_compute.state, dut.u_compute.busy,
-                    dut.u_compute.dp_start, dut.u_compute.dp_done, dut.u_compute.dp_busy);
+                $display("  DBG: comp=%0d dma_wr_req=%b dma_wr_done=%b wr_active=%b awvalid=%b awready=%b wvalid=%b wready=%b",
+                    dut.u_compute.state,
+                    dut.tc_dma_wr_req, dut.tc_dma_wr_done,
+                    dut.u_dma.wr_active,
+                    m_axi_awvalid, m_axi_awready,
+                    m_axi_wvalid, m_axi_wready);
             end
         join_none
 
