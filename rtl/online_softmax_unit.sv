@@ -195,7 +195,8 @@ module online_softmax_unit #(
                             rescale[r] <= '0;
                         else
                             rescale[r] <= (l_old[r] * SCORE_WIDTH'(exp_m_diff[r])) >> FRAC_BITS;
-                        p_matrix[r] <= exp_vals[r];
+                        for (int c = 0; c < TILE_BC; c++)
+                            p_matrix[r][c] <= exp_vals[r][c];
                     end
                     state <= S_DONE;
                 end
