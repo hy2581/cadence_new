@@ -219,32 +219,40 @@ module dma_engine #(
                         axi_wr_len  <= dma_wr_len_bytes;
                         wr_beat_cnt <= '0;
                         wr_state    <= WR_ADDR;
+                        // Start reading first buffer beat
+                        buf_o_rd_en      <= 1'b1;
+                        buf_o_rd_row     <= '0;
+                        buf_o_rd_col_grp <= '0;
                     end
                 end
 
                 WR_ADDR: begin
-                    // Wait for AXI master to accept the address
-                    // Meanwhile, start reading buffer
-                    buf_o_rd_en      <= 1'b1;
-                    buf_o_rd_row     <= '0;
-                    buf_o_rd_col_grp <= '0;
+                    // Wait until AXI master gives data_ready (after AW accepted by slave)
                     if (axi_wr_data_ready) begin
+                        // Send first beat (data was pre-read)
+                        axi_wr_data       <= buf_o_rd_data;
+                        axi_wr_data_valid <= 1'b1;
+                        wr_beat_cnt       <= wr_beat_cnt + 1;
+                        // Pre-read next
+                        if (wr_beat_cnt < O_TOTAL_BEATS - 1) begin
+                            buf_o_rd_en      <= 1'b1;
+                            buf_o_rd_row     <= 16'(wr_beat_cnt + 1) / O_BEATS_PER_ROW;
+                            buf_o_rd_col_grp <= 16'(wr_beat_cnt + 1) % O_BEATS_PER_ROW;
+                        end
                         wr_state <= WR_DATA;
                     end
                 end
 
                 WR_DATA: begin
                     if (axi_wr_data_ready) begin
-                        // Send current buffer data
                         axi_wr_data       <= buf_o_rd_data;
                         axi_wr_data_valid <= 1'b1;
                         wr_beat_cnt       <= wr_beat_cnt + 1;
 
-                        // Pre-read next beat
                         if (wr_beat_cnt < O_TOTAL_BEATS - 1) begin
                             buf_o_rd_en      <= 1'b1;
-                            buf_o_rd_row     <= (wr_beat_cnt + 1) / O_BEATS_PER_ROW;
-                            buf_o_rd_col_grp <= (wr_beat_cnt + 1) % O_BEATS_PER_ROW;
+                            buf_o_rd_row     <= 16'(wr_beat_cnt + 1) / O_BEATS_PER_ROW;
+                            buf_o_rd_col_grp <= 16'(wr_beat_cnt + 1) % O_BEATS_PER_ROW;
                         end
 
                         if (wr_beat_cnt == O_TOTAL_BEATS - 1)
