@@ -100,13 +100,13 @@ module tile_controller #(
             o_writeback_start  <= 1'b0;
         end else begin
             all_done          <= 1'b0;
-            dma_rd_req        <= 1'b0;
-            dma_wr_req        <= 1'b0;
             compute_start     <= 1'b0;
             o_writeback_start <= 1'b0;
 
             case (state)
                 ST_IDLE: begin
+                    dma_rd_req <= 1'b0;
+                    dma_wr_req <= 1'b0;
                     if (start) begin
                         state  <= ST_LOAD_Q;
                         busy   <= 1'b1;
@@ -116,14 +116,15 @@ module tile_controller #(
                 end
 
                 ST_LOAD_Q: begin
-                    dma_rd_req      <= 1'b1;
-                    dma_rd_addr     <= q_base_addr + AXI_ADDR_WIDTH'(q_idx) * AXI_ADDR_WIDTH'(stride_bytes) * TILE_BR;
+                    dma_rd_req       <= 1'b1;
+                    dma_rd_addr      <= q_base_addr + AXI_ADDR_WIDTH'(q_idx) * AXI_ADDR_WIDTH'(stride_bytes) * TILE_BR;
                     dma_rd_len_bytes <= Q_TILE_BYTES;
-                    dma_rd_target   <= 2'd0;
-                    state           <= ST_WAIT_Q;
+                    dma_rd_target    <= 2'd0;
+                    state            <= ST_WAIT_Q;
                 end
 
                 ST_WAIT_Q: begin
+                    dma_rd_req <= 1'b0;
                     if (dma_rd_done) begin
                         kv_idx     <= '0;
                         kv_buf_sel <= 1'b0;
@@ -132,7 +133,6 @@ module tile_controller #(
                 end
 
                 ST_LOAD_KV: begin
-                    // Load K tile
                     dma_rd_req       <= 1'b1;
                     dma_rd_addr      <= k_base_addr + AXI_ADDR_WIDTH'(kv_idx) * AXI_ADDR_WIDTH'(stride_bytes) * TILE_BC;
                     dma_rd_len_bytes <= KV_TILE_BYTES;
@@ -141,8 +141,9 @@ module tile_controller #(
                 end
 
                 ST_WAIT_KV: begin
+                    dma_rd_req <= 1'b0;
                     if (dma_rd_done) begin
-                        // Also load V tile (reuse the same state for simplicity; in practice pipelined)
+                        // Load V tile
                         dma_rd_req       <= 1'b1;
                         dma_rd_addr      <= v_base_addr + AXI_ADDR_WIDTH'(kv_idx) * AXI_ADDR_WIDTH'(stride_bytes) * TILE_BC;
                         dma_rd_len_bytes <= KV_TILE_BYTES;
@@ -152,6 +153,7 @@ module tile_controller #(
                 end
 
                 ST_COMPUTE: begin
+                    dma_rd_req <= 1'b0;
                     if (dma_rd_done) begin
                         compute_start    <= 1'b1;
                         compute_first_kv <= (kv_idx == 0);
@@ -185,6 +187,7 @@ module tile_controller #(
                 end
 
                 ST_WAIT_O: begin
+                    dma_wr_req <= 1'b0;
                     if (dma_wr_done) begin
                         state <= ST_NEXT_Q;
                     end

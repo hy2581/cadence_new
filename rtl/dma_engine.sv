@@ -137,18 +137,21 @@ module dma_engine #(
             buf_k_wr_en   <= 1'b0;
             buf_v_wr_en   <= 1'b0;
         end else begin
-            axi_rd_req  <= 1'b0;
             dma_rd_done <= 1'b0;
             buf_q_wr_en <= 1'b0;
             buf_k_wr_en <= 1'b0;
             buf_v_wr_en <= 1'b0;
 
-            if (dma_rd_req) begin
+            // Capture DMA read request and hold axi_rd_req until done
+            if (dma_rd_req && !axi_rd_req) begin
                 axi_rd_req    <= 1'b1;
                 axi_rd_addr   <= dma_rd_addr;
                 axi_rd_len    <= dma_rd_len_bytes;
                 rd_target_reg <= dma_rd_target;
                 rd_beat_cnt   <= '0;
+            end
+            if (axi_rd_done) begin
+                axi_rd_req <= 1'b0;
             end
 
             if (axi_rd_data_valid) begin
@@ -196,7 +199,6 @@ module dma_engine #(
             axi_wr_data_valid <= 1'b0;
             buf_o_rd_en      <= 1'b0;
         end else begin
-            axi_wr_req       <= 1'b0;
             dma_wr_done      <= 1'b0;
             buf_o_rd_en      <= 1'b0;
             axi_wr_data_valid <= 1'b0;
@@ -222,8 +224,10 @@ module dma_engine #(
                     wr_active <= 1'b0;
             end
 
-            if (axi_wr_done)
+            if (axi_wr_done) begin
                 dma_wr_done <= 1'b1;
+                axi_wr_req  <= 1'b0;
+            end
         end
     end
 
