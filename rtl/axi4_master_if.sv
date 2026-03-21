@@ -197,19 +197,18 @@ module axi4_master_if #(
                 end
 
                 WR_DATA: begin
-                    if (wr_data_valid && wr_data_ready) begin
-                        m_axi_wdata  <= wr_data;
-                        m_axi_wvalid <= 1'b1;
+                    // Direct passthrough: data from dma_engine → AXI W
+                    m_axi_wdata  <= wr_data;
+                    m_axi_wvalid <= wr_data_valid;
+                    if (wr_data_valid) begin
                         wr_beats_cnt <= wr_beats_cnt + 1;
                         m_axi_wlast  <= (wr_beats_cnt == wr_beats_total - 1);
                     end
-                    if (m_axi_wvalid && m_axi_wready) begin
-                        m_axi_wvalid <= 1'b0;
-                        if (m_axi_wlast) begin
-                            wr_data_ready <= 1'b0;
-                            m_axi_wlast   <= 1'b0;
-                            wr_state      <= WR_DONE;
-                        end
+                    if (m_axi_wvalid && m_axi_wready && m_axi_wlast) begin
+                        m_axi_wvalid  <= 1'b0;
+                        m_axi_wlast   <= 1'b0;
+                        wr_data_ready <= 1'b0;
+                        wr_state      <= WR_DONE;
                     end
                 end
 

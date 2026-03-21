@@ -232,22 +232,23 @@ module dma_engine #(
                 end
 
                 WR_DATA: begin
-                    // buf_o_rd_data is combinationally valid from previous cycle's address
-                    axi_wr_data       <= buf_o_rd_data;
-                    axi_wr_data_valid <= 1'b1;
-                    wr_beat_cnt       <= wr_beat_cnt + 1;
+                    if (axi_wr_data_ready) begin
+                        axi_wr_data       <= buf_o_rd_data;
+                        axi_wr_data_valid <= 1'b1;
+                        wr_beat_cnt       <= wr_beat_cnt + 1;
 
-                    // Setup next read
-                    if (wr_beat_cnt + 1 < O_TOTAL_BEATS) begin
-                        buf_o_rd_en      <= 1'b1;
-                        buf_o_rd_row     <= (wr_beat_cnt + 1) / O_BEATS_PER_ROW;
-                        buf_o_rd_col_grp <= (wr_beat_cnt + 1) % O_BEATS_PER_ROW;
+                        // Pre-read next beat
+                        if (wr_beat_cnt + 1 < O_TOTAL_BEATS) begin
+                            buf_o_rd_en      <= 1'b1;
+                            buf_o_rd_row     <= (wr_beat_cnt + 1) / O_BEATS_PER_ROW;
+                            buf_o_rd_col_grp <= (wr_beat_cnt + 1) % O_BEATS_PER_ROW;
+                        end
+
+                        if (wr_beat_cnt == O_TOTAL_BEATS - 1)
+                            wr_state <= WR_FINISH;
                     end else begin
-                        buf_o_rd_en <= 1'b0;
+                        axi_wr_data_valid <= 1'b0;
                     end
-
-                    if (wr_beat_cnt == O_TOTAL_BEATS - 1)
-                        wr_state <= WR_FINISH;
                 end
 
                 WR_FINISH: begin
