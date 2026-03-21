@@ -107,31 +107,31 @@ module system_tb;
         end
     end
 
-    // AXI4 Read Slave — Task-based (procedural, clear timing)
+    // AXI4 Read Slave — using negedge for setup, posedge for sample
     initial begin
         m_axi_arready = 0; m_axi_rvalid = 0; m_axi_rlast = 0;
         m_axi_rdata = 0; m_axi_rid = 0; m_axi_rresp = 0;
         forever begin
-            // Wait for read address
             @(posedge clk);
             while (!m_axi_arvalid) @(posedge clk);
 
-            // Accept address
             begin
                 reg [63:0] addr;
-                reg [7:0] len;
-                reg [2:0] sz;
-                integer beat_bytes, b, cnt;
+                integer len, sz, beat_bytes, b, cnt;
                 addr = m_axi_araddr;
                 len  = m_axi_arlen;
                 sz   = m_axi_arsize;
                 beat_bytes = 1 << sz;
+
+                // Accept address at negedge (so DUT sees arready=1 at next posedge)
+                @(negedge clk);
                 m_axi_arready = 1;
-                @(posedge clk);
+                @(negedge clk);
                 m_axi_arready = 0;
 
                 // Send data beats
                 for (cnt = 0; cnt <= len; cnt = cnt + 1) begin
+                    @(negedge clk);  // setup before posedge
                     for (b = 0; b < 16; b = b + 1) begin
                         if (b < beat_bytes)
                             m_axi_rdata[b*8 +: 8] = mem.exists(addr + b) ? mem[addr + b] : 8'h0;
@@ -141,17 +141,20 @@ module system_tb;
                     m_axi_rvalid = 1;
                     m_axi_rlast  = (cnt == len);
                     m_axi_rresp  = 2'b00;
-                    @(posedge clk);
-                    while (!m_axi_rready) @(posedge clk);
+                    @(posedge clk);  // DUT samples here
+                    while (!m_axi_rready) begin
+                        @(posedge clk);
+                    end
                     addr = addr + beat_bytes;
                 end
+                @(negedge clk);
                 m_axi_rvalid = 0;
                 m_axi_rlast  = 0;
             end
         end
     end
 
-    // AXI4 Write Slave — Task-based (procedural)
+    // AXI4 Write Slave — negedge-driven
     initial begin
         m_axi_awready = 0; m_axi_wready = 0;
         m_axi_bvalid = 0; m_axi_bid = 0; m_axi_bresp = 0;
@@ -161,19 +164,16 @@ module system_tb;
 
             begin
                 reg [63:0] addr;
-                reg [7:0] len;
-                reg [2:0] sz;
                 integer beat_bytes, b;
                 addr = m_axi_awaddr;
-                len  = m_axi_awlen;
-                sz   = m_axi_awsize;
-                beat_bytes = 1 << sz;
-                m_axi_awready = 1;
-                @(posedge clk);
-                m_axi_awready = 0;
+                beat_bytes = 1 << m_axi_awsize;
 
-                // Accept write data beats
+                @(negedge clk);
+                m_axi_awready = 1;
+                @(negedge clk);
+                m_axi_awready = 0;
                 m_axi_wready = 1;
+
                 begin : wr_loop
                     reg wr_done_flag;
                     wr_done_flag = 0;
@@ -189,11 +189,13 @@ module system_tb;
                         end
                     end
                 end
+                @(negedge clk);
                 m_axi_wready = 0;
                 m_axi_bvalid = 1;
                 m_axi_bresp  = 2'b00;
                 @(posedge clk);
                 while (!m_axi_bready) @(posedge clk);
+                @(negedge clk);
                 m_axi_bvalid = 0;
             end
         end
@@ -358,7 +360,7 @@ module system_tb;
         repeat(200) begin
             @(posedge clk);
             if ($time < 1100000)  // only first 200 cycles after start
-                $display("t=%0t tc_state=%0d dma_rd_req=%b dma_rd_done=%b axi_ar_valid=%b axi_ar_ready=%b axi_r_valid=%b busy=%b",
+                $display("t=%0t tc=%0d rd_req=%b rd_done=%b arV=%b arR=%b rV=%b rR=%b axm_rd=%0d rlast=%b",
                     $time,
                     dut.u_tile_ctrl.state,
                     dut.tc_dma_rd_req,
@@ -366,7 +368,9 @@ module system_tb;
                     dut.m_axi_arvalid,
                     m_axi_arready,
                     m_axi_rvalid,
-                    dut.u_tile_ctrl.busy);
+                    dut.m_axi_rready,
+                    dut.u_dma.u_axi_master.rd_state,
+                    m_axi_rlast);
         end
 
         // Step 5: Poll STATUS.DONE
