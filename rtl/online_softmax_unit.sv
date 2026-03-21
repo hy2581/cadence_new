@@ -55,7 +55,9 @@ module online_softmax_unit #(
     // Counters for sequential processing
     logic [$clog2(TILE_BR):0] cur_row;
     logic [$clog2(TILE_BC):0] cur_col;
-    logic [3:0] wait_cnt;
+    logic [$clog2(TILE_BR):0] out_row;
+    logic [$clog2(TILE_BC):0] out_col;
+    logic [7:0] wait_cnt;
 
     // Row max intermediate
     logic signed [SCORE_WIDTH-1:0] row_max_tmp;
@@ -98,46 +100,59 @@ module online_softmax_unit #(
                     end
                     cur_row  <= '0;
                     cur_col  <= '0;
+                    out_row  <= '0;
+                    out_col  <= '0;
+                    wait_cnt <= '0;
                     state    <= S_EXP_START;
                 end
 
-                // Feed one element at a time to exp unit
+                // Pipeline exp: feed one element per cycle, collect results after 3-cycle delay
                 S_EXP_START: begin
-                    if (cur_row < TILE_BR && cur_col < TILE_BC) begin
+                    if (cur_row < TILE_BR) begin
                         exp_valid_in <= 1'b1;
                         exp_x_in     <= scores[cur_row][cur_col] - m_new[cur_row];
-                        wait_cnt     <= '0;
-                        state        <= S_EXP_WAIT;
+                        // Advance input pointer
+                        if (cur_col == TILE_BC - 1) begin
+                            cur_col <= '0;
+                            cur_row <= cur_row + 1;
+                        end else begin
+                            cur_col <= cur_col + 1;
+                        end
+                        wait_cnt <= wait_cnt + 1;  // track total inputs fed
+                        state <= S_EXP_START;       // stay in this state!
                     end else begin
-                        // All elements processed, finalize
-                        state <= S_FINALIZE;
+                        exp_valid_in <= 1'b0;
+                        // All inputs fed, wait for last outputs
+                        state <= S_EXP_WAIT;
+                    end
+
+                    // Collect exp outputs (arrive 3 cycles after input)
+                    if (exp_valid_out) begin
+                        // output_row/col tracks which element this output belongs to
+                        p_matrix[out_row][out_col] <= exp_y_out;
+                        if (out_col == TILE_BC - 1) begin
+                            out_col <= '0;
+                            out_row <= out_row + 1;
+                        end else begin
+                            out_col <= out_col + 1;
+                        end
                     end
                 end
 
-                // Wait for exp result (3 pipeline cycles)
+                // Drain remaining exp pipeline outputs
                 S_EXP_WAIT: begin
-                    wait_cnt <= wait_cnt + 1;
                     if (exp_valid_out) begin
-                        p_matrix[cur_row][cur_col] <= exp_y_out;
-                        // Advance to next element
-                        if (cur_col == TILE_BC - 1) begin
-                            cur_col <= '0;
-                            cur_row <= cur_row + 1;
+                        p_matrix[out_row][out_col] <= exp_y_out;
+                        if (out_col == TILE_BC - 1) begin
+                            out_col <= '0;
+                            out_row <= out_row + 1;
                         end else begin
-                            cur_col <= cur_col + 1;
+                            out_col <= out_col + 1;
                         end
-                        state <= S_EXP_START;
-                    end else if (wait_cnt > 10) begin
-                        // Safety: if exp never outputs, store 0 and move on
-                        p_matrix[cur_row][cur_col] <= '0;
-                        if (cur_col == TILE_BC - 1) begin
-                            cur_col <= '0;
-                            cur_row <= cur_row + 1;
-                        end else begin
-                            cur_col <= cur_col + 1;
-                        end
-                        state <= S_EXP_START;
                     end
+                    // All outputs collected when out_row reaches TILE_BR
+                    if (out_row >= TILE_BR && !exp_valid_out)
+                        state <= S_FINALIZE;
                 end
 
                 // Compute row sums, l_new, rescale
