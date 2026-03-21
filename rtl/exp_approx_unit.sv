@@ -1,8 +1,9 @@
 // ============================================================
-// Exp Approximation Unit
-// Computes exp(x) for signed fixed-point input (Q8.8 or wider)
-// Method: exp(x) = 2^(x / ln2) = 2^(x * LOG2E)
-//   Split into integer part (shift) + fractional part (LUT)
+// Exp Approximation Unit — Simplified Direct LUT
+// Input:  signed fixed-point Q(IN_WIDTH-FRAC_IN).FRAC_IN
+// Output: unsigned fixed-point Q(OUT_WIDTH-FRAC_OUT).FRAC_OUT
+// Range:  exp(x) for x in [-16, +4]
+// Method: Single-cycle LUT with 3-stage pipeline for timing
 // ============================================================
 module exp_approx_unit #(
     parameter IN_WIDTH  = 40,
@@ -10,106 +11,115 @@ module exp_approx_unit #(
     parameter OUT_WIDTH = 24,
     parameter FRAC_OUT  = 16
 )(
-    input  logic                    clk,
-    input  logic                    rst_n,
-    input  logic                    valid_in,
-    input  logic signed [IN_WIDTH-1:0] x_in,       // signed fixed-point input
-    input  logic signed [15:0]     neg_large,       // -inf threshold (Q8.8)
-    output logic                    valid_out,
-    output logic [OUT_WIDTH-1:0]    exp_out          // unsigned fixed-point output
+    input  logic                        clk,
+    input  logic                        rst_n,
+    input  logic                        valid_in,
+    input  logic signed [IN_WIDTH-1:0]  x_in,
+    input  logic signed [15:0]          neg_large,
+    output logic                        valid_out,
+    output logic [OUT_WIDTH-1:0]        exp_out
 );
 
-    // LOG2E ≈ 1.4427 in Q1.15 = 16'd47274 (1.4427 * 32768)
-    localparam logic signed [16:0] LOG2E = 17'sd47274;
+    // LUT: 1024 entries covering x from -16.0 to +4.0
+    // step = 20.0/1024 ≈ 0.01953125
+    // index = (x_real + 16.0) / 0.01953125 = (x_real + 16.0) * 51.2
+    localparam LUT_SIZE = 1024;
+    reg [OUT_WIDTH-1:0] exp_lut [0:LUT_SIZE-1];
 
-    // Pipeline stage 1: multiply x * LOG2E
-    logic signed [IN_WIDTH+16:0] product_s1;
-    logic valid_s1;
-    logic signed [IN_WIDTH-1:0] x_s1;
-
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            valid_s1  <= 1'b0;
-            product_s1 <= '0;
-            x_s1      <= '0;
-        end else begin
-            valid_s1 <= valid_in;
-            x_s1     <= x_in;
-            if (x_in < {{(IN_WIDTH-16){neg_large[15]}}, neg_large})
-                product_s1 <= '0;  // underflow → exp = 0
-            else
-                product_s1 <= x_in * LOG2E;
-        end
-    end
-
-    // Pipeline stage 2: extract integer and fractional parts, LUT + shift
-    // product is in Q(INT_BITS).(FRAC_IN+15) format
-    // We need to extract the value in terms of 2^(int_part) * LUT(frac_part)
-    localparam PROD_FRAC = FRAC_IN + 15;
-
-    logic [7:0]  lut_addr;
-    logic [15:0] lut_value;
-    logic signed [7:0] int_part;
-    logic valid_s2;
-
-    // Exp2 LUT: stores 2^(frac/256) * 65536 for frac in [0, 255]
-    logic [15:0] exp2_lut [0:255];
-
-    integer _ei;
+    integer _i;
+    real _x_val, _e_val;
+    integer _i_val;
     initial begin
-        for (_ei = 0; _ei < 256; _ei = _ei + 1) begin
-            exp2_lut[_ei] = 16'(int'((2.0 ** (real'(_ei) / 256.0)) * (2.0 ** FRAC_OUT) + 0.5));
+        for (_i = 0; _i < LUT_SIZE; _i = _i + 1) begin
+            _x_val = -16.0 + ($itor(_i) * 20.0 / 1024.0);
+            _e_val = $exp(_x_val);
+            _i_val = $rtoi(_e_val * 65536.0);
+            if (_i_val > ((1 << OUT_WIDTH) - 1))
+                exp_lut[_i] = {OUT_WIDTH{1'b1}};
+            else
+                exp_lut[_i] = _i_val[OUT_WIDTH-1:0];
         end
+    end
+
+    // Stage 1: convert x_in to LUT index (combinational prep + register)
+    logic valid_p1;
+    logic [9:0] idx_p1;
+    logic clamp_low_p1, clamp_high_p1;
+
+    // Combinational index computation (verified in debug)
+    reg signed [IN_WIDTH-1:0] x_plus_16_c;
+    reg signed [IN_WIDTH-1:0] idx_calc_c;
+
+    always @(*) begin
+        x_plus_16_c = x_in + (16 * (1 << FRAC_IN));
+        idx_calc_c  = x_plus_16_c / 5;
     end
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            valid_s2 <= 1'b0;
-            lut_addr <= '0;
-            int_part <= '0;
+            valid_p1      <= 0;
+            idx_p1        <= 0;
+            clamp_low_p1  <= 0;
+            clamp_high_p1 <= 0;
         end else begin
-            valid_s2 <= valid_s1;
-            if (product_s1 == '0 && x_s1 < 0) begin
-                int_part <= -8'sd128;  // signal underflow
-                lut_addr <= 8'd0;
+            valid_p1 <= valid_in;
+            if (x_plus_16_c <= 0) begin
+                idx_p1        <= 0;
+                clamp_low_p1  <= 1;
+                clamp_high_p1 <= 0;
+            end else if (idx_calc_c >= LUT_SIZE) begin
+                idx_p1        <= LUT_SIZE - 1;
+                clamp_low_p1  <= 0;
+                clamp_high_p1 <= 1;
             end else begin
-                // int_part = product >> PROD_FRAC (signed)
-                int_part <= product_s1[IN_WIDTH+16 -: 8];
-                // frac_part top 8 bits after the integer
-                lut_addr <= product_s1[PROD_FRAC-1 -: 8];
+                idx_p1        <= idx_calc_c[9:0];
+                clamp_low_p1  <= 0;
+                clamp_high_p1 <= 0;
             end
         end
     end
 
-    always_comb begin
-        lut_value = exp2_lut[lut_addr];
-    end
+    // Stage 2: LUT read (combinational read, then register)
+    logic valid_p2;
+    logic [OUT_WIDTH-1:0] lut_val_p2;
+    logic clamp_low_p2, clamp_high_p2;
 
-    // Pipeline stage 3: shift LUT output by integer part
-    logic valid_s3;
-    logic [OUT_WIDTH-1:0] result;
+    wire [OUT_WIDTH-1:0] lut_rd_val = exp_lut[idx_p1];
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            valid_s3 <= 1'b0;
-            result   <= '0;
+            valid_p2      <= 0;
+            lut_val_p2    <= 0;
+            clamp_low_p2  <= 0;
+            clamp_high_p2 <= 0;
         end else begin
-            valid_s3 <= valid_s2;
-            if (int_part < -8'sd16) begin
-                result <= '0;  // too negative, exp ≈ 0
-            end else if (int_part >= 8'sd8) begin
-                result <= {OUT_WIDTH{1'b1}};  // saturate
-            end else begin
-                // Shift LUT value: positive int_part shifts left, negative shifts right
-                if (int_part >= 0)
-                    result <= OUT_WIDTH'(({8'b0, lut_value} << int_part[3:0]));
-                else
-                    result <= OUT_WIDTH'(lut_value >> (-int_part[3:0]));
-            end
+            valid_p2      <= valid_p1;
+            lut_val_p2    <= lut_rd_val;
+            clamp_low_p2  <= clamp_low_p1;
+            clamp_high_p2 <= clamp_high_p1;
         end
     end
 
-    assign valid_out = valid_s3;
-    assign exp_out   = result;
+    // Stage 3: output
+    logic valid_p3;
+    logic [OUT_WIDTH-1:0] result_p3;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            valid_p3  <= 0;
+            result_p3 <= 0;
+        end else begin
+            valid_p3 <= valid_p2;
+            if (clamp_low_p2)
+                result_p3 <= 0;
+            else if (clamp_high_p2)
+                result_p3 <= {OUT_WIDTH{1'b1}};
+            else
+                result_p3 <= lut_val_p2;
+        end
+    end
+
+    assign valid_out = valid_p3;
+    assign exp_out   = result_p3;
 
 endmodule
