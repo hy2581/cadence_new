@@ -1,116 +1,122 @@
 // ============================================================
-// Dot-Product Array
-// Computes S_ij = Q_tile · K_tile^T for one tile pair
-// Input: B_r rows of Q (each d elements), B_c rows of K (each d elements)
-// Output: B_r × B_c score values
-// Processing: streams d elements over multiple cycles
+// 点积阵列
+// 计算 S_ij = Q分块 · K分块^T（一对分块的注意力分数）
+// 输入：Q分块行数 行的Q（每行 d 个元素），KV分块行数 行的K（每行 d 个元素）
+// 输出：Q分块行数 × KV分块行数 的分数矩阵
+// 处理方式：分多步流式输入，每步处理 并行乘累加数 个元素
 // ============================================================
-module dot_product_array #(
-    parameter TILE_BR    = 4,
-    parameter TILE_BC    = 16,
-    parameter HEAD_DIM   = 64,
-    parameter DATA_WIDTH = 16,
-    parameter ACC_WIDTH  = 40,
-    parameter PAR_MACS   = 8     // parallel MACs per dot-product per cycle
+module 点积阵列 #(
+    parameter Q分块行数    = 4,
+    parameter KV分块行数   = 16,
+    parameter 头维度       = 64,
+    parameter 数据位宽     = 16,
+    parameter 累加器位宽   = 40,
+    parameter 并行乘累加数 = 8      // 每步并行处理8个乘累加
 )(
-    input  logic                    clk,
-    input  logic                    rst_n,
+    input  logic                    时钟,
+    input  logic                    复位_低有效,
 
-    // Control
-    input  logic                    start,
-    output logic                    done,
-    output logic                    busy,
+    // 控制信号
+    input  logic                    启动,
+    output logic                    完成,
+    output logic                    忙碌,
 
-    // Q tile data: B_r rows, streamed PAR_MACS elements per cycle
-    input  logic signed [DATA_WIDTH-1:0] q_data [TILE_BR-1:0][PAR_MACS-1:0],
-    // K tile data: B_c rows, streamed PAR_MACS elements per cycle
-    input  logic signed [DATA_WIDTH-1:0] k_data [TILE_BC-1:0][PAR_MACS-1:0],
-    input  logic                    data_valid,
+    // Q分块数据：Q分块行数 行，每步流式输入 并行乘累加数 个元素
+    input  logic signed [数据位宽-1:0] Q数据 [Q分块行数-1:0][并行乘累加数-1:0],
+    // K分块数据：KV分块行数 行，每步流式输入 并行乘累加数 个元素
+    input  logic signed [数据位宽-1:0] K数据 [KV分块行数-1:0][并行乘累加数-1:0],
+    input  logic                    数据有效,
 
-    // Scale factor (Q8.8)
-    input  logic signed [DATA_WIDTH-1:0] scale,
+    // 缩放因子（Q8.8格式）
+    input  logic signed [数据位宽-1:0] 缩放因子,
 
-    // Output scores: B_r × B_c
-    output logic signed [ACC_WIDTH-1:0]  scores [TILE_BR-1:0][TILE_BC-1:0],
-    output logic                    scores_valid
+    // 输出分数矩阵：Q分块行数 × KV分块行数
+    output logic signed [累加器位宽-1:0] 分数矩阵 [Q分块行数-1:0][KV分块行数-1:0],
+    output logic                    分数有效
 );
 
-    localparam NUM_STEPS = HEAD_DIM / PAR_MACS;  // 64/8 = 8
+    localparam 总步数 = 头维度 / 并行乘累加数;  // 64/8 = 8步
 
-    // Accumulator array
-    logic signed [ACC_WIDTH-1:0] acc [TILE_BR-1:0][TILE_BC-1:0];
-    logic [$clog2(NUM_STEPS):0] step_cnt;
+    // 累加器阵列
+    logic signed [累加器位宽-1:0] 累加器 [Q分块行数-1:0][KV分块行数-1:0];
+    logic [$clog2(总步数):0] 步计数;
 
     typedef enum logic [1:0] {
-        S_IDLE,
-        S_ACCUMULATE,
-        S_SCALE,
-        S_DONE
-    } state_t;
+        空闲,      // 等待启动
+        累加中,    // 逐步累加点积
+        缩放中,    // 乘以缩放因子
+        完成状态   // 输出结果
+    } 状态类型;
 
-    state_t state;
+    状态类型 当前状态;
 
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            state        <= S_IDLE;
-            step_cnt     <= '0;
-            scores_valid <= 1'b0;
-            done         <= 1'b0;
-            busy         <= 1'b0;
-            for (int r = 0; r < TILE_BR; r++)
-                for (int c = 0; c < TILE_BC; c++)
-                    acc[r][c] <= '0;
+    always_ff @(posedge 时钟 or negedge 复位_低有效) begin
+        if (!复位_低有效) begin
+            当前状态 <= 空闲;
+            步计数   <= '0;
+            分数有效 <= 1'b0;
+            完成     <= 1'b0;
+            忙碌     <= 1'b0;
+            for (int 行 = 0; 行 < Q分块行数; 行++)
+                for (int 列 = 0; 列 < KV分块行数; 列++)
+                    累加器[行][列] <= '0;
         end else begin
-            scores_valid <= 1'b0;
-            done         <= 1'b0;
+            分数有效 <= 1'b0;
+            完成     <= 1'b0;
 
-            case (state)
-                S_IDLE: begin
-                    if (start) begin
-                        state    <= S_ACCUMULATE;
-                        step_cnt <= '0;
-                        busy     <= 1'b1;
-                        for (int r = 0; r < TILE_BR; r++)
-                            for (int c = 0; c < TILE_BC; c++)
-                                acc[r][c] <= '0;
+            case (当前状态)
+                // ---- 空闲：等待启动信号 ----
+                空闲: begin
+                    if (启动) begin
+                        当前状态 <= 累加中;
+                        步计数   <= '0;
+                        忙碌     <= 1'b1;
+                        // 清零所有累加器
+                        for (int 行 = 0; 行 < Q分块行数; 行++)
+                            for (int 列 = 0; 列 < KV分块行数; 列++)
+                                累加器[行][列] <= '0;
                     end
                 end
 
-                S_ACCUMULATE: begin
-                    if (data_valid) begin
-                        for (int r = 0; r < TILE_BR; r++) begin
-                            for (int c = 0; c < TILE_BC; c++) begin
-                                logic signed [ACC_WIDTH-1:0] partial_sum;
-                                partial_sum = '0;
-                                for (int p = 0; p < PAR_MACS; p++) begin
-                                    partial_sum = partial_sum +
-                                        ACC_WIDTH'(q_data[r][p]) * ACC_WIDTH'(k_data[c][p]);
+                // ---- 累加中：每步接收 并行乘累加数 个元素，计算部分点积 ----
+                // 对每对(Q行, K行)，累加 Σ Q[行][p] × K[列][p]
+                累加中: begin
+                    if (数据有效) begin
+                        for (int 行 = 0; 行 < Q分块行数; 行++) begin
+                            for (int 列 = 0; 列 < KV分块行数; 列++) begin
+                                logic signed [累加器位宽-1:0] 部分和;
+                                部分和 = '0;
+                                for (int p = 0; p < 并行乘累加数; p++) begin
+                                    部分和 = 部分和 +
+                                        累加器位宽'(Q数据[行][p]) * 累加器位宽'(K数据[列][p]);
                                 end
-                                acc[r][c] <= acc[r][c] + partial_sum;
+                                累加器[行][列] <= 累加器[行][列] + 部分和;
                             end
                         end
-                        step_cnt <= step_cnt + 1;
-                        if (step_cnt == NUM_STEPS - 1)
-                            state <= S_SCALE;
+                        步计数 <= 步计数 + 1;
+                        if (步计数 == 总步数 - 1)
+                            当前状态 <= 缩放中;
                     end
                 end
 
-                S_SCALE: begin
-                    for (int r = 0; r < TILE_BR; r++) begin
-                        for (int c = 0; c < TILE_BC; c++) begin
-                            // acc is in Q16.16 (two Q8.8 multiplied), scale is Q8.8
-                            // result = acc * scale >> 8 to keep as Q-format score
-                            scores[r][c] <= (acc[r][c] * ACC_WIDTH'(scale)) >>> 8;
+                // ---- 缩放中：分数 = 累加结果 × 缩放因子 ----
+                // 累加器是 Q16.16（两个Q8.8相乘），缩放因子是 Q8.8
+                // 结果 = 累加器 × 缩放因子 >> 8（保持Q格式）
+                缩放中: begin
+                    for (int 行 = 0; 行 < Q分块行数; 行++) begin
+                        for (int 列 = 0; 列 < KV分块行数; 列++) begin
+                            分数矩阵[行][列] <= (累加器[行][列] * 累加器位宽'(缩放因子)) >>> 8;
                         end
                     end
-                    state <= S_DONE;
+                    当前状态 <= 完成状态;
                 end
 
-                S_DONE: begin
-                    scores_valid <= 1'b1;
-                    done         <= 1'b1;
-                    busy         <= 1'b0;
-                    state        <= S_IDLE;
+                // ---- 完成：输出分数矩阵 ----
+                完成状态: begin
+                    分数有效 <= 1'b1;
+                    完成     <= 1'b1;
+                    忙碌     <= 1'b0;
+                    当前状态 <= 空闲;
                 end
             endcase
         end

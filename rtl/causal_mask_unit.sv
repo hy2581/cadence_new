@@ -1,28 +1,31 @@
 // ============================================================
-// Causal Mask Unit
-// Generates mask signals for FlashAttention causal masking
-// When col_idx > row_idx, the score should be replaced with NEG_LARGE
+// 因果掩码单元
+// 生成FlashAttention的因果（下三角）掩码信号
+// 当 列索引 > 行索引 时，分数应替换为 负大值
+// 这确保了每个token只能关注它自身及之前的token（自回归特性）
 // ============================================================
-module causal_mask_unit #(
-    parameter SEQ_LEN   = 256,
-    parameter TILE_BR   = 4,
-    parameter TILE_BC   = 16,
-    parameter IDX_WIDTH = $clog2(SEQ_LEN)
+module 因果掩码单元 #(
+    parameter 序列长度   = 256,
+    parameter Q分块行数  = 4,
+    parameter KV分块行数 = 16,
+    parameter 索引位宽   = $clog2(序列长度)
 )(
-    input  logic                    causal_en,
-    input  logic [IDX_WIDTH-1:0]    q_tile_idx,     // which Q tile (0..NUM_Q_TILES-1)
-    input  logic [IDX_WIDTH-1:0]    kv_tile_idx,    // which KV tile (0..NUM_KV_TILES-1)
-    input  logic [$clog2(TILE_BR)-1:0] row_in_tile, // row within Q tile (0..B_r-1)
-    input  logic [$clog2(TILE_BC)-1:0] col_in_tile, // col within KV tile (0..B_c-1)
-    output logic                    mask_out         // 1 = masked (replace with NEG_LARGE)
+    input  logic                    因果掩码使能,    // 是否启用因果掩码
+    input  logic [索引位宽-1:0]     Q分块索引,       // 当前Q分块编号（0~Q分块总数-1）
+    input  logic [索引位宽-1:0]     KV分块索引,      // 当前KV分块编号（0~KV分块总数-1）
+    input  logic [$clog2(Q分块行数)-1:0]  分块内行号, // Q分块内的行号（0~Q分块行数-1）
+    input  logic [$clog2(KV分块行数)-1:0] 分块内列号, // KV分块内的列号（0~KV分块行数-1）
+    output logic                    掩码输出         // 1 = 被掩码（需替换为负大值）
 );
 
-    logic [IDX_WIDTH-1:0] abs_row, abs_col;
+    logic [索引位宽-1:0] 绝对行号, 绝对列号;
 
     always_comb begin
-        abs_row = q_tile_idx * TILE_BR + IDX_WIDTH'(row_in_tile);
-        abs_col = kv_tile_idx * TILE_BC + IDX_WIDTH'(col_in_tile);
-        mask_out = causal_en & (abs_col > abs_row);
+        // 将分块内的相对位置转换为序列中的绝对位置
+        绝对行号 = Q分块索引 * Q分块行数 + 索引位宽'(分块内行号);
+        绝对列号 = KV分块索引 * KV分块行数 + 索引位宽'(分块内列号);
+        // 当因果掩码使能且列号大于行号时，输出掩码信号
+        掩码输出 = 因果掩码使能 & (绝对列号 > 绝对行号);
     end
 
 endmodule
