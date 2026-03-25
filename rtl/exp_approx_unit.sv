@@ -1,113 +1,116 @@
 // ============================================================
-// Exp Approximation Unit — Simplified Direct LUT
-// Input:  signed fixed-point Q(IN_WIDTH-FRAC_IN).FRAC_IN
-// Output: unsigned fixed-point Q(OUT_WIDTH-FRAC_OUT).FRAC_OUT
-// Range:  exp(x) for x in [-16, +4]
-// Method: Single-cycle LUT with 3-stage pipeline for timing
+// 指数近似单元 — 基于查找表的直接实现
+// 输入：有符号定点数 Q(输入位宽-输入小数位).输入小数位
+// 输出：无符号定点数 Q(输出位宽-输出小数位).输出小数位
+// 范围：exp(x)，x ∈ [-16, +4]
+// 方法：3级流水线查找表（单周期查表 + 流水线寄存器提升时序）
 // ============================================================
-module exp_approx_unit #(
-    parameter IN_WIDTH  = 40,
-    parameter FRAC_IN   = 8,
-    parameter OUT_WIDTH = 24,
-    parameter FRAC_OUT  = 16
+module 指数近似单元 #(
+    parameter 输入位宽     = 40,
+    parameter 输入小数位   = 8,
+    parameter 输出位宽     = 24,
+    parameter 输出小数位   = 16
 )(
-    input  logic                        clk,
-    input  logic                        rst_n,
-    input  logic                        valid_in,
-    input  logic signed [IN_WIDTH-1:0]  x_in,
-    input  logic signed [15:0]          neg_large,
-    output logic                        valid_out,
-    output logic [OUT_WIDTH-1:0]        exp_out
+    input  logic                        时钟,
+    input  logic                        复位_低有效,
+    input  logic                        输入有效,
+    input  logic signed [输入位宽-1:0]  输入值,
+    input  logic signed [15:0]          负大值,
+    output logic                        输出有效,
+    output logic [输出位宽-1:0]         指数输出
 );
 
-    // LUT: 1024 entries covering x from -16.0 to +4.0
-    // step = 20.0/1024 ≈ 0.01953125
-    // index = (x_real + 16.0) / 0.01953125 = (x_real + 16.0) * 51.2
-    localparam LUT_SIZE = 1024;
+    // 查找表：1024个条目，覆盖 x 从 -16.0 到 +4.0
+    // 步长 = 20.0/1024 ≈ 0.01953125
+    // 索引 = (x实数 + 16.0) / 0.01953125 = (x实数 + 16.0) × 51.2
+    localparam 查找表大小 = 1024;
 
-    // Stage 1: convert x_in to LUT index (combinational prep + register)
-    logic valid_p1;
-    logic [9:0] idx_p1;
-    logic clamp_low_p1, clamp_high_p1;
+    // ===== 第1级流水线：将输入转换为查找表索引 =====
+    logic 第1级有效;
+    logic [9:0] 第1级索引;
+    logic 第1级_下限截断, 第1级_上限截断;
 
-    // Combinational index computation (verified in debug)
-    reg signed [IN_WIDTH-1:0] x_plus_16_c;
-    reg signed [IN_WIDTH-1:0] idx_calc_c;
+    // 组合逻辑计算索引
+    reg signed [输入位宽-1:0] 加16后的值;
+    reg signed [输入位宽-1:0] 索引计算值;
 
     always @(*) begin
-        x_plus_16_c = x_in + (16 * (1 << FRAC_IN));
-        idx_calc_c  = x_plus_16_c / 5;
+        加16后的值 = 输入值 + (16 * (1 << 输入小数位));   // x + 16（定点数）
+        索引计算值 = 加16后的值 / 5;                      // 近似除法得到索引
     end
 
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            valid_p1      <= 0;
-            idx_p1        <= 0;
-            clamp_low_p1  <= 0;
-            clamp_high_p1 <= 0;
+    always_ff @(posedge 时钟 or negedge 复位_低有效) begin
+        if (!复位_低有效) begin
+            第1级有效     <= 0;
+            第1级索引     <= 0;
+            第1级_下限截断 <= 0;
+            第1级_上限截断 <= 0;
         end else begin
-            valid_p1 <= valid_in;
-            if (x_plus_16_c <= 0) begin
-                idx_p1        <= 0;
-                clamp_low_p1  <= 1;
-                clamp_high_p1 <= 0;
-            end else if (idx_calc_c >= LUT_SIZE) begin
-                idx_p1        <= LUT_SIZE - 1;
-                clamp_low_p1  <= 0;
-                clamp_high_p1 <= 1;
+            第1级有效 <= 输入有效;
+            if (加16后的值 <= 0) begin
+                // x < -16：exp值极小，截断为0
+                第1级索引     <= 0;
+                第1级_下限截断 <= 1;
+                第1级_上限截断 <= 0;
+            end else if (索引计算值 >= 查找表大小) begin
+                // x > +4：exp值很大，截断为最大值
+                第1级索引     <= 查找表大小 - 1;
+                第1级_下限截断 <= 0;
+                第1级_上限截断 <= 1;
             end else begin
-                idx_p1        <= idx_calc_c[9:0];
-                clamp_low_p1  <= 0;
-                clamp_high_p1 <= 0;
+                // 正常范围：使用计算出的索引
+                第1级索引     <= 索引计算值[9:0];
+                第1级_下限截断 <= 0;
+                第1级_上限截断 <= 0;
             end
         end
     end
 
-    // LUT ROM instance (after idx_p1 declaration)
-    wire [OUT_WIDTH-1:0] lut_rom_data;
-    exp_lut_rom u_lut_rom (.addr(idx_p1), .data(lut_rom_data));
+    // 查找表ROM实例（在第1级索引确定后查表）
+    wire [输出位宽-1:0] ROM查表数据;
+    指数查找表ROM 实例_查找表ROM (.地址(第1级索引), .数据(ROM查表数据));
 
-    // Stage 2: LUT read (combinational read, then register)
-    logic valid_p2;
-    logic [OUT_WIDTH-1:0] lut_val_p2;
-    logic clamp_low_p2, clamp_high_p2;
+    // ===== 第2级流水线：锁存查找表读出值 =====
+    logic 第2级有效;
+    logic [输出位宽-1:0] 第2级_查表值;
+    logic 第2级_下限截断, 第2级_上限截断;
 
-    wire [OUT_WIDTH-1:0] lut_rd_val = lut_rom_data;
+    wire [输出位宽-1:0] 查表读出值 = ROM查表数据;
 
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            valid_p2      <= 0;
-            lut_val_p2    <= 0;
-            clamp_low_p2  <= 0;
-            clamp_high_p2 <= 0;
+    always_ff @(posedge 时钟 or negedge 复位_低有效) begin
+        if (!复位_低有效) begin
+            第2级有效     <= 0;
+            第2级_查表值   <= 0;
+            第2级_下限截断 <= 0;
+            第2级_上限截断 <= 0;
         end else begin
-            valid_p2      <= valid_p1;
-            lut_val_p2    <= lut_rd_val;
-            clamp_low_p2  <= clamp_low_p1;
-            clamp_high_p2 <= clamp_high_p1;
+            第2级有效     <= 第1级有效;
+            第2级_查表值   <= 查表读出值;
+            第2级_下限截断 <= 第1级_下限截断;
+            第2级_上限截断 <= 第1级_上限截断;
         end
     end
 
-    // Stage 3: output
-    logic valid_p3;
-    logic [OUT_WIDTH-1:0] result_p3;
+    // ===== 第3级流水线：输出结果（含截断处理） =====
+    logic 第3级有效;
+    logic [输出位宽-1:0] 第3级_结果;
 
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            valid_p3  <= 0;
-            result_p3 <= 0;
+    always_ff @(posedge 时钟 or negedge 复位_低有效) begin
+        if (!复位_低有效) begin
+            第3级有效 <= 0;
+            第3级_结果 <= 0;
         end else begin
-            valid_p3 <= valid_p2;
-            if (clamp_low_p2)
-                result_p3 <= 0;
-            else if (clamp_high_p2)
-                result_p3 <= {OUT_WIDTH{1'b1}};
+            第3级有效 <= 第2级有效;
+            if (第2级_下限截断)
+                第3级_结果 <= 0;                    // x太小，exp(x) ≈ 0
+            else if (第2级_上限截断)
+                第3级_结果 <= {输出位宽{1'b1}};     // x太大，exp(x)饱和到最大值
             else
-                result_p3 <= lut_val_p2;
+                第3级_结果 <= 第2级_查表值;          // 正常值
         end
     end
 
-    assign valid_out = valid_p3;
-    assign exp_out   = result_p3;
+    assign 输出有效 = 第3级有效;
+    assign 指数输出 = 第3级_结果;
 
 endmodule

@@ -1,153 +1,158 @@
 // ============================================================
-// Output Accumulator
-// Accumulates O = rescale * O_old + P · V for FlashAttention
-// For each KV-tile iteration:
-//   O_new[r][j] = rescale[r] * O_old[r][j] + Σ_c P[r][c] * V[c][j]
-// After last KV-tile: normalize O by dividing by l (done externally or here)
+// 输出累加器
+// 累加 O = 缩放修正 × O旧值 + P · V（FlashAttention核心公式）
+// 每个KV分块迭代执行：
+//   O_new[行][列] = 缩放修正[行] × O_old[行][列] + Σ_c P[行][c] × V[c][列]
+// 最后一个KV分块处理完后：用分母和 l 归一化O
 // ============================================================
-module output_accumulator #(
-    parameter TILE_BR    = 4,
-    parameter TILE_BC    = 16,
-    parameter HEAD_DIM   = 64,
-    parameter DATA_WIDTH = 16,
-    parameter ACC_WIDTH  = 40,
-    parameter EXP_WIDTH  = 24,
-    parameter FRAC_BITS  = 16,
-    parameter PAR_COLS   = 8    // parallel V columns processed per cycle
+module 输出累加器 #(
+    parameter Q分块行数    = 4,
+    parameter KV分块行数   = 16,
+    parameter 头维度       = 64,
+    parameter 数据位宽     = 16,
+    parameter 累加器位宽   = 40,
+    parameter 指数输出位宽 = 24,
+    parameter 小数位数     = 16,
+    parameter 并行列数     = 8      // 每周期并行处理8列V
 )(
-    input  logic                          clk,
-    input  logic                          rst_n,
+    input  logic                          时钟,
+    input  logic                          复位_低有效,
 
-    // Control
-    input  logic                          start,
-    input  logic                          first_tile,
-    input  logic                          last_tile,      // final KV tile → produce output
-    output logic                          done,
-    output logic                          busy,
+    // 控制信号
+    input  logic                          启动,
+    input  logic                          首个分块,      // 第一个KV分块
+    input  logic                          末个分块,      // 最后一个KV分块 → 需归一化并输出
+    output logic                          完成,
+    output logic                          忙碌,
 
-    // P matrix from softmax (B_r × B_c)
-    input  logic [EXP_WIDTH-1:0]          p_matrix [TILE_BR-1:0][TILE_BC-1:0],
+    // 概率矩阵 P（来自Softmax，Q分块行数 × KV分块行数）
+    input  logic [指数输出位宽-1:0]       概率矩阵 [Q分块行数-1:0][KV分块行数-1:0],
 
-    // V tile data: B_c rows × d cols, streamed PAR_COLS per cycle
-    input  logic signed [DATA_WIDTH-1:0]  v_data [TILE_BC-1:0][PAR_COLS-1:0],
-    input  logic                          v_valid,
+    // V分块数据：KV分块行数 行 × d 列，每周期流式输入 并行列数 列
+    input  logic signed [数据位宽-1:0]    V数据 [KV分块行数-1:0][并行列数-1:0],
+    input  logic                          V有效,
 
-    // Rescale factor per row (from softmax)
-    input  logic [ACC_WIDTH-1:0]          rescale [TILE_BR-1:0],
+    // 缩放修正因子（每行一个，用于修正旧O）
+    input  logic [累加器位宽-1:0]         缩放修正 [Q分块行数-1:0],
 
-    // l_new per row (for final normalization)
-    input  logic [ACC_WIDTH-1:0]          l_values [TILE_BR-1:0],
+    // 分母和（每行一个，最终归一化用）
+    input  logic [累加器位宽-1:0]         分母和 [Q分块行数-1:0],
 
-    // Output O tile: B_r × d, available when done
-    output logic signed [DATA_WIDTH-1:0]  o_out [TILE_BR-1:0][HEAD_DIM-1:0],
-    output logic                          o_valid
+    // 输出 O分块：Q分块行数 × 头维度，完成时有效
+    output logic signed [数据位宽-1:0]    O输出 [Q分块行数-1:0][头维度-1:0],
+    output logic                          O有效
 );
 
-    localparam NUM_V_STEPS = HEAD_DIM / PAR_COLS;  // 64/8 = 8
+    localparam V总步数 = 头维度 / 并行列数;  // 64/8 = 8步
 
-    // O accumulator (B_r × d, ACC_WIDTH bits)
-    logic signed [ACC_WIDTH-1:0] o_acc [TILE_BR-1:0][HEAD_DIM-1:0];
+    // O累加器（Q分块行数 × 头维度，使用 累加器位宽 位防溢出）
+    logic signed [累加器位宽-1:0] O累加器 [Q分块行数-1:0][头维度-1:0];
 
     typedef enum logic [2:0] {
-        S_IDLE,
-        S_RESCALE,
-        S_PV_MULT,
-        S_NORMALIZE,
-        S_DONE
-    } state_t;
+        空闲,          // 等待启动
+        缩放旧值,      // 将旧O乘以缩放修正因子
+        PV乘累加,      // 计算 P·V 并累加
+        归一化,        // 最终除以分母和 l
+        处理完成       // 输出结果
+    } 状态类型;
 
-    state_t state;
-    logic [$clog2(NUM_V_STEPS):0] v_step;
-    logic [$clog2(HEAD_DIM):0] col_base;
+    状态类型 当前状态;
+    logic [$clog2(V总步数):0] V步进;
+    logic [$clog2(头维度):0]  列基址;        // 当前处理的起始列号
 
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            state   <= S_IDLE;
-            done    <= 1'b0;
-            busy    <= 1'b0;
-            o_valid <= 1'b0;
-            v_step  <= '0;
-            col_base <= '0;
-            for (int r = 0; r < TILE_BR; r++)
-                for (int j = 0; j < HEAD_DIM; j++)
-                    o_acc[r][j] <= '0;
+    always_ff @(posedge 时钟 or negedge 复位_低有效) begin
+        if (!复位_低有效) begin
+            当前状态 <= 空闲;
+            完成     <= 1'b0;
+            忙碌     <= 1'b0;
+            O有效    <= 1'b0;
+            V步进    <= '0;
+            列基址   <= '0;
+            for (int 行 = 0; 行 < Q分块行数; 行++)
+                for (int 列 = 0; 列 < 头维度; 列++)
+                    O累加器[行][列] <= '0;
         end else begin
-            done    <= 1'b0;
-            o_valid <= 1'b0;
+            完成  <= 1'b0;
+            O有效 <= 1'b0;
 
-            case (state)
-                S_IDLE: begin
-                    if (start) begin
-                        state <= first_tile ? S_PV_MULT : S_RESCALE;
-                        busy  <= 1'b1;
-                        v_step <= '0;
-                        col_base <= '0;
-                        if (first_tile) begin
-                            for (int r = 0; r < TILE_BR; r++)
-                                for (int j = 0; j < HEAD_DIM; j++)
-                                    o_acc[r][j] <= '0;
+            case (当前状态)
+                // ---- 空闲：等待启动 ----
+                空闲: begin
+                    if (启动) begin
+                        当前状态 <= 首个分块 ? PV乘累加 : 缩放旧值;
+                        忙碌     <= 1'b1;
+                        V步进    <= '0;
+                        列基址   <= '0;
+                        if (首个分块) begin
+                            // 第一个KV分块：清零累加器
+                            for (int 行 = 0; 行 < Q分块行数; 行++)
+                                for (int 列 = 0; 列 < 头维度; 列++)
+                                    O累加器[行][列] <= '0;
                         end
                     end
                 end
 
-                // Rescale existing O: O_old *= rescale / l_new
-                S_RESCALE: begin
-                    for (int r = 0; r < TILE_BR; r++) begin
-                        for (int j = 0; j < HEAD_DIM; j++) begin
-                            if (l_values[r] != '0)
-                                o_acc[r][j] <= (o_acc[r][j] * signed'({1'b0, rescale[r]})) >>> FRAC_BITS;
+                // ---- 缩放旧值：O_old = O_old × 缩放修正 / l_new ----
+                缩放旧值: begin
+                    for (int 行 = 0; 行 < Q分块行数; 行++) begin
+                        for (int 列 = 0; 列 < 头维度; 列++) begin
+                            if (分母和[行] != '0)
+                                O累加器[行][列] <= (O累加器[行][列] * signed'({1'b0, 缩放修正[行]})) >>> 小数位数;
                             else
-                                o_acc[r][j] <= '0;
+                                O累加器[行][列] <= '0;
                         end
                     end
-                    state    <= S_PV_MULT;
-                    v_step   <= '0;
-                    col_base <= '0;
+                    当前状态 <= PV乘累加;
+                    V步进    <= '0;
+                    列基址   <= '0;
                 end
 
-                // P · V accumulation: streamed over PAR_COLS columns per cycle
-                S_PV_MULT: begin
-                    if (v_valid) begin
-                        for (int r = 0; r < TILE_BR; r++) begin
-                            for (int p = 0; p < PAR_COLS; p++) begin
-                                logic signed [ACC_WIDTH-1:0] pv_sum;
-                                pv_sum = '0;
-                                for (int c = 0; c < TILE_BC; c++) begin
-                                    pv_sum = pv_sum +
-                                        (signed'({1'b0, p_matrix[r][c]}) * ACC_WIDTH'(v_data[c][p])) >>> FRAC_BITS;
+                // ---- PV乘累加：O += P · V ----
+                // 每步处理 并行列数 列，共 V总步数 步
+                PV乘累加: begin
+                    if (V有效) begin
+                        for (int 行 = 0; 行 < Q分块行数; 行++) begin
+                            for (int p = 0; p < 并行列数; p++) begin
+                                logic signed [累加器位宽-1:0] PV和;
+                                PV和 = '0;
+                                // 对所有KV行求和：PV和 = Σ_c P[行][c] × V[c][p]
+                                for (int c = 0; c < KV分块行数; c++) begin
+                                    PV和 = PV和 +
+                                        (signed'({1'b0, 概率矩阵[行][c]}) * 累加器位宽'(V数据[c][p])) >>> 小数位数;
                                 end
-                                o_acc[r][col_base + p] <= o_acc[r][col_base + p] + pv_sum;
+                                O累加器[行][列基址 + p] <= O累加器[行][列基址 + p] + PV和;
                             end
                         end
-                        col_base <= col_base + PAR_COLS;
-                        v_step   <= v_step + 1;
-                        if (v_step == NUM_V_STEPS - 1)
-                            state <= last_tile ? S_NORMALIZE : S_DONE;
+                        列基址 <= 列基址 + 并行列数;
+                        V步进  <= V步进 + 1;
+                        if (V步进 == V总步数 - 1)
+                            当前状态 <= 末个分块 ? 归一化 : 处理完成;
                     end
                 end
 
-                // Final normalization: O /= l
-                S_NORMALIZE: begin
-                    for (int r = 0; r < TILE_BR; r++) begin
-                        for (int j = 0; j < HEAD_DIM; j++) begin
-                            logic signed [ACC_WIDTH-1:0] normalized;
-                            if (l_values[r] != '0)
-                                normalized = (o_acc[r][j] << FRAC_BITS) /
-                                             signed'({1'b0, l_values[r]});
+                // ---- 归一化：O = O / l（最终输出） ----
+                归一化: begin
+                    for (int 行 = 0; 行 < Q分块行数; 行++) begin
+                        for (int 列 = 0; 列 < 头维度; 列++) begin
+                            logic signed [累加器位宽-1:0] 归一化值;
+                            if (分母和[行] != '0)
+                                归一化值 = (O累加器[行][列] << 小数位数) /
+                                           signed'({1'b0, 分母和[行]});
                             else
-                                normalized = '0;
-                            // Truncate to Q8.8
-                            o_out[r][j] <= DATA_WIDTH'(normalized >>> (FRAC_BITS - 8));
+                                归一化值 = '0;
+                            // 截断为 Q8.8 格式输出
+                            O输出[行][列] <= 数据位宽'(归一化值 >>> (小数位数 - 8));
                         end
                     end
-                    state <= S_DONE;
+                    当前状态 <= 处理完成;
                 end
 
-                S_DONE: begin
-                    o_valid <= last_tile;
-                    done    <= 1'b1;
-                    busy    <= 1'b0;
-                    state   <= S_IDLE;
+                // ---- 处理完成 ----
+                处理完成: begin
+                    O有效    <= 末个分块;    // 仅在最后一个KV分块时输出有效
+                    完成     <= 1'b1;
+                    忙碌     <= 1'b0;
+                    当前状态 <= 空闲;
                 end
             endcase
         end

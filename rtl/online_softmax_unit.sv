@@ -1,185 +1,202 @@
 // ============================================================
-// Online Softmax Unit (Simplified)
-// Sequential processing: for each row, iterate over B_c columns
-// No complex pipeline scheduling — reliable operation
+// 在线Softmax单元（简化版）
+// 串行处理：对每一行，遍历 KV分块行数 列
+// 无复杂流水线调度 — 可靠运行
+//
+// 算法流程：
+//   1. 求每行最大值 → 更新 m_new = max(m_old, row_max)
+//   2. 计算 exp(score - m_new) → 得到概率矩阵P
+//   3. 求每行P的和 → 更新 l_new = l_old + row_sum
+//   4. 计算缩放修正因子（用于修正旧的O累加值）
 // ============================================================
-module online_softmax_unit #(
-    parameter TILE_BR     = 4,
-    parameter TILE_BC     = 16,
-    parameter SCORE_WIDTH = 40,
-    parameter EXP_WIDTH   = 24,
-    parameter FRAC_BITS   = 16
+module 在线Softmax单元 #(
+    parameter Q分块行数    = 4,
+    parameter KV分块行数   = 16,
+    parameter 分数位宽     = 40,
+    parameter 指数输出位宽 = 24,
+    parameter 小数位数     = 16
 )(
-    input  logic                          clk,
-    input  logic                          rst_n,
-    input  logic                          start,
-    input  logic                          first_tile,
-    output logic                          done,
-    output logic                          busy,
-    input  logic signed [SCORE_WIDTH-1:0] scores [TILE_BR-1:0][TILE_BC-1:0],
-    input  logic signed [15:0]            neg_large,
-    input  logic signed [SCORE_WIDTH-1:0] m_old [TILE_BR-1:0],
-    input  logic [SCORE_WIDTH-1:0]        l_old [TILE_BR-1:0],
-    output logic signed [SCORE_WIDTH-1:0] m_new [TILE_BR-1:0],
-    output logic [SCORE_WIDTH-1:0]        l_new [TILE_BR-1:0],
-    output logic [EXP_WIDTH-1:0]          p_matrix [TILE_BR-1:0][TILE_BC-1:0],
-    output logic [SCORE_WIDTH-1:0]        rescale [TILE_BR-1:0],
-    output logic                          results_valid
+    input  logic                          时钟,
+    input  logic                          复位_低有效,
+    input  logic                          启动,
+    input  logic                          首个分块,      // 是否为该Q分块的第一个KV分块
+    output logic                          完成,
+    output logic                          忙碌,
+    // 输入的分数矩阵 S[Q分块行数][KV分块行数]
+    input  logic signed [分数位宽-1:0]    分数矩阵 [Q分块行数-1:0][KV分块行数-1:0],
+    input  logic signed [15:0]            负大值,
+    // 上一轮的最大值和分母和（用于在线更新）
+    input  logic signed [分数位宽-1:0]    旧最大值 [Q分块行数-1:0],
+    input  logic [分数位宽-1:0]           旧分母和 [Q分块行数-1:0],
+    // 本轮更新后的最大值和分母和
+    output logic signed [分数位宽-1:0]    新最大值 [Q分块行数-1:0],
+    output logic [分数位宽-1:0]           新分母和 [Q分块行数-1:0],
+    // 概率矩阵 P = exp(S - m_new)
+    output logic [指数输出位宽-1:0]       概率矩阵 [Q分块行数-1:0][KV分块行数-1:0],
+    // 缩放修正因子（用于修正之前累加的O值）
+    output logic [分数位宽-1:0]           缩放修正 [Q分块行数-1:0],
+    output logic                          结果有效
 );
 
+    // 状态机定义
     typedef enum logic [2:0] {
-        S_IDLE,
-        S_ROW_MAX,
-        S_EXP_START,
-        S_EXP_WAIT,
-        S_FINALIZE,
-        S_DONE
-    } state_t;
+        空闲,          // 等待启动
+        求行最大值,    // 计算每行的最大分数值
+        指数_输入,     // 逐元素送入指数单元
+        指数_等待,     // 等待指数流水线排空
+        求和与修正,    // 计算行和、更新分母、计算缩放修正
+        处理完成       // 输出结果
+    } 状态类型;
 
-    state_t state;
+    状态类型 当前状态;
 
-    // Exp unit (single instance, time-multiplexed)
-    logic                          exp_valid_in, exp_valid_out;
-    logic signed [SCORE_WIDTH-1:0] exp_x_in;
-    logic [EXP_WIDTH-1:0]          exp_y_out;
+    // 指数单元实例（单个，时分复用）
+    logic                          指数_输入有效, 指数_输出有效;
+    logic signed [分数位宽-1:0]    指数_输入值;
+    logic [指数输出位宽-1:0]       指数_输出值;
 
-    exp_approx_unit #(
-        .IN_WIDTH(SCORE_WIDTH), .FRAC_IN(FRAC_BITS),
-        .OUT_WIDTH(EXP_WIDTH), .FRAC_OUT(FRAC_BITS)
-    ) u_exp (
-        .clk(clk), .rst_n(rst_n),
-        .valid_in(exp_valid_in), .x_in(exp_x_in), .neg_large(neg_large),
-        .valid_out(exp_valid_out), .exp_out(exp_y_out)
+    指数近似单元 #(
+        .输入位宽(分数位宽), .输入小数位(小数位数),
+        .输出位宽(指数输出位宽), .输出小数位(小数位数)
+    ) 实例_指数单元 (
+        .时钟(时钟), .复位_低有效(复位_低有效),
+        .输入有效(指数_输入有效), .输入值(指数_输入值), .负大值(负大值),
+        .输出有效(指数_输出有效), .指数输出(指数_输出值)
     );
 
-    // Counters for sequential processing
-    logic [$clog2(TILE_BR):0] cur_row;
-    logic [$clog2(TILE_BC):0] cur_col;
-    logic [$clog2(TILE_BR):0] out_row;
-    logic [$clog2(TILE_BC):0] out_col;
-    logic [7:0] wait_cnt;
+    // 串行处理的计数器
+    logic [$clog2(Q分块行数):0]  当前输入行;     // 正在送入指数单元的行
+    logic [$clog2(KV分块行数):0] 当前输入列;     // 正在送入的列
+    logic [$clog2(Q分块行数):0]  当前输出行;     // 正在接收指数输出的行
+    logic [$clog2(KV分块行数):0] 当前输出列;     // 正在接收的列
+    logic [7:0] 等待计数;
 
-    // Row max intermediate
-    logic signed [SCORE_WIDTH-1:0] row_max_tmp;
+    // 行最大值中间变量
+    logic signed [分数位宽-1:0] 行最大值_临时;
 
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            state         <= S_IDLE;
-            done          <= 1'b0;
-            busy          <= 1'b0;
-            results_valid <= 1'b0;
-            exp_valid_in  <= 1'b0;
-            cur_row       <= '0;
-            cur_col       <= '0;
-            wait_cnt      <= '0;
+    always_ff @(posedge 时钟 or negedge 复位_低有效) begin
+        if (!复位_低有效) begin
+            当前状态     <= 空闲;
+            完成         <= 1'b0;
+            忙碌         <= 1'b0;
+            结果有效     <= 1'b0;
+            指数_输入有效 <= 1'b0;
+            当前输入行   <= '0;
+            当前输入列   <= '0;
+            等待计数     <= '0;
         end else begin
-            done          <= 1'b0;
-            results_valid <= 1'b0;
-            exp_valid_in  <= 1'b0;
+            完成         <= 1'b0;
+            结果有效     <= 1'b0;
+            指数_输入有效 <= 1'b0;
 
-            case (state)
-                S_IDLE: begin
-                    if (start) begin
-                        state   <= S_ROW_MAX;
-                        busy    <= 1'b1;
-                        cur_row <= '0;
+            case (当前状态)
+                // ---- 空闲：等待启动 ----
+                空闲: begin
+                    if (启动) begin
+                        当前状态 <= 求行最大值;
+                        忙碌     <= 1'b1;
+                        当前输入行 <= '0;
                     end
                 end
 
-                // Compute row-wise max across all rows
-                S_ROW_MAX: begin
-                    for (int r = 0; r < TILE_BR; r++) begin
-                        logic signed [SCORE_WIDTH-1:0] rmax;
-                        rmax = scores[r][0];
-                        for (int c = 1; c < TILE_BC; c++)
-                            if (scores[r][c] > rmax) rmax = scores[r][c];
-                        if (first_tile)
-                            m_new[r] <= rmax;
+                // ---- 求行最大值：对所有行并行计算最大值 ----
+                求行最大值: begin
+                    for (int 行 = 0; 行 < Q分块行数; 行++) begin
+                        logic signed [分数位宽-1:0] 行最大;
+                        行最大 = 分数矩阵[行][0];
+                        for (int 列 = 1; 列 < KV分块行数; 列++)
+                            if (分数矩阵[行][列] > 行最大) 行最大 = 分数矩阵[行][列];
+                        // 与旧最大值比较，取较大者
+                        if (首个分块)
+                            新最大值[行] <= 行最大;
                         else
-                            m_new[r] <= (rmax > m_old[r]) ? rmax : m_old[r];
+                            新最大值[行] <= (行最大 > 旧最大值[行]) ? 行最大 : 旧最大值[行];
                     end
-                    cur_row  <= '0;
-                    cur_col  <= '0;
-                    out_row  <= '0;
-                    out_col  <= '0;
-                    wait_cnt <= '0;
-                    state    <= S_EXP_START;
+                    当前输入行 <= '0;
+                    当前输入列 <= '0;
+                    当前输出行 <= '0;
+                    当前输出列 <= '0;
+                    等待计数   <= '0;
+                    当前状态   <= 指数_输入;
                 end
 
-                // Pipeline exp: feed one element per cycle, collect results after 3-cycle delay
-                S_EXP_START: begin
-                    if (cur_row < TILE_BR) begin
-                        exp_valid_in <= 1'b1;
-                        exp_x_in     <= scores[cur_row][cur_col] - m_new[cur_row];
-                        // Advance input pointer
-                        if (cur_col == TILE_BC - 1) begin
-                            cur_col <= '0;
-                            cur_row <= cur_row + 1;
+                // ---- 指数输入：逐元素计算 exp(score - m_new) ----
+                // 每周期送入1个元素，3周期后收到结果（流水线延迟）
+                指数_输入: begin
+                    if (当前输入行 < Q分块行数) begin
+                        指数_输入有效 <= 1'b1;
+                        // 输入 = 分数 - 新最大值（使最大分数变为0，其余为负数）
+                        指数_输入值   <= 分数矩阵[当前输入行][当前输入列] - 新最大值[当前输入行];
+                        // 推进输入指针
+                        if (当前输入列 == KV分块行数 - 1) begin
+                            当前输入列 <= '0;
+                            当前输入行 <= 当前输入行 + 1;
                         end else begin
-                            cur_col <= cur_col + 1;
+                            当前输入列 <= 当前输入列 + 1;
                         end
-                        wait_cnt <= wait_cnt + 1;  // track total inputs fed
-                        state <= S_EXP_START;       // stay in this state!
+                        等待计数 <= 等待计数 + 1;
+                        当前状态 <= 指数_输入;  // 继续送入
                     end else begin
-                        exp_valid_in <= 1'b0;
-                        // All inputs fed, wait for last outputs
-                        state <= S_EXP_WAIT;
+                        指数_输入有效 <= 1'b0;
+                        // 所有元素已送入，等待最后的输出
+                        当前状态 <= 指数_等待;
                     end
 
-                    // Collect exp outputs (arrive 3 cycles after input)
-                    if (exp_valid_out) begin
-                        // output_row/col tracks which element this output belongs to
-                        p_matrix[out_row][out_col] <= exp_y_out;
-                        if (out_col == TILE_BC - 1) begin
-                            out_col <= '0;
-                            out_row <= out_row + 1;
+                    // 收集指数输出（比输入延迟3个周期）
+                    if (指数_输出有效) begin
+                        概率矩阵[当前输出行][当前输出列] <= 指数_输出值;
+                        if (当前输出列 == KV分块行数 - 1) begin
+                            当前输出列 <= '0;
+                            当前输出行 <= 当前输出行 + 1;
                         end else begin
-                            out_col <= out_col + 1;
+                            当前输出列 <= 当前输出列 + 1;
                         end
                     end
                 end
 
-                // Drain remaining exp pipeline outputs
-                S_EXP_WAIT: begin
-                    if (exp_valid_out) begin
-                        p_matrix[out_row][out_col] <= exp_y_out;
-                        if (out_col == TILE_BC - 1) begin
-                            out_col <= '0;
-                            out_row <= out_row + 1;
+                // ---- 指数等待：排空流水线中剩余的输出 ----
+                指数_等待: begin
+                    if (指数_输出有效) begin
+                        概率矩阵[当前输出行][当前输出列] <= 指数_输出值;
+                        if (当前输出列 == KV分块行数 - 1) begin
+                            当前输出列 <= '0;
+                            当前输出行 <= 当前输出行 + 1;
                         end else begin
-                            out_col <= out_col + 1;
+                            当前输出列 <= 当前输出列 + 1;
                         end
                     end
-                    // All outputs collected when out_row reaches TILE_BR
-                    if (out_row >= TILE_BR && !exp_valid_out)
-                        state <= S_FINALIZE;
+                    // 当所有输出都收集完毕时，进入求和阶段
+                    if (当前输出行 >= Q分块行数 && !指数_输出有效)
+                        当前状态 <= 求和与修正;
                 end
 
-                // Compute row sums, l_new, rescale
-                S_FINALIZE: begin
-                    for (int r = 0; r < TILE_BR; r++) begin
-                        logic [SCORE_WIDTH-1:0] rsum;
-                        rsum = '0;
-                        for (int c = 0; c < TILE_BC; c++)
-                            rsum = rsum + SCORE_WIDTH'(p_matrix[r][c]);
-                        if (first_tile) begin
-                            l_new[r]   <= rsum;
-                            rescale[r] <= '0;
+                // ---- 求和与修正：计算行和、更新分母、计算缩放修正因子 ----
+                求和与修正: begin
+                    for (int 行 = 0; 行 < Q分块行数; 行++) begin
+                        logic [分数位宽-1:0] 行和;
+                        行和 = '0;
+                        for (int 列 = 0; 列 < KV分块行数; 列++)
+                            行和 = 行和 + 分数位宽'(概率矩阵[行][列]);
+                        if (首个分块) begin
+                            // 第一个KV分块：l_new = 行和，无需缩放修正
+                            新分母和[行]  <= 行和;
+                            缩放修正[行]  <= '0;
                         end else begin
-                            // Approximate: rescale = l_old (simplified; proper impl needs exp(m_old-m_new))
-                            // For now use direct l_old as rescale factor
-                            l_new[r]   <= l_old[r] + rsum;
-                            rescale[r] <= l_old[r];
+                            // 后续KV分块：l_new = l_old + 行和
+                            // 缩放修正 = l_old（简化实现；完整版需要 exp(m_old-m_new)）
+                            新分母和[行]  <= 旧分母和[行] + 行和;
+                            缩放修正[行]  <= 旧分母和[行];
                         end
                     end
-                    state <= S_DONE;
+                    当前状态 <= 处理完成;
                 end
 
-                S_DONE: begin
-                    results_valid <= 1'b1;
-                    done          <= 1'b1;
-                    busy          <= 1'b0;
-                    state         <= S_IDLE;
+                // ---- 处理完成 ----
+                处理完成: begin
+                    结果有效 <= 1'b1;
+                    完成     <= 1'b1;
+                    忙碌     <= 1'b0;
+                    当前状态 <= 空闲;
                 end
             endcase
         end

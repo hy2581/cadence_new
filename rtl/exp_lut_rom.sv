@@ -1,56 +1,54 @@
 // ============================================================
-// Exp LUT ROM — Synthesizable version
-// Stores exp(x) * 65536 for x from -16.0 to +4.0 in 1024 entries
-// For synthesis: uses case statement (synthesized to ROM)
-// For simulation: uses initial block (faster)
+// 指数查找表ROM — 可综合版本
+// 存储 exp(x) × 65536 的值，x 从 -16.0 到 +4.0，共1024个条目
+// 综合模式：使用case语句（综合器会推断为ROM）
+// 仿真模式：使用initial块计算（更快更精确）
 // ============================================================
-module exp_lut_rom (
-    input  logic [9:0]  addr,
-    output logic [23:0] data
+module 指数查找表ROM (
+    input  logic [9:0]  地址,
+    output logic [23:0] 数据
 );
 
 `ifdef SYNTHESIS
-    // Synthesizable: hardcoded case for key entries
-    // Full 1024-entry ROM would be too verbose here
-    // Use a simplified piecewise approximation for synthesis
+    // ===== 综合模式：分段线性近似 =====
+    // 完整1024条目ROM太长，用分段近似代替
     always_comb begin
-        // exp(x) where x = -16 + addr * 20/1024
-        // For synthesis, use linear interpolation between key points
-        if (addr < 410)       // x < -8: exp very small
-            data = 24'd0;
-        else if (addr < 614)  // x in [-8, -4]: small values
-            data = 24'(addr - 410);
-        else if (addr < 768)  // x in [-4, -1]
-            data = 24'((addr - 614) * 157); // ramp up
-        else if (addr < 819)  // x in [-1, 0]
-            data = 24'(24109 + (addr - 768) * 813);
-        else if (addr < 870)  // x in [0, 1]
-            data = 24'(65536 + (addr - 819) * 2211);
-        else if (addr < 922)  // x in [1, 2]
-            data = 24'(178145 + (addr - 870) * 5889);
-        else if (addr < 973)  // x in [2, 3]
-            data = 24'(484249 + (addr - 922) * 16015);
-        else                  // x > 3
-            data = 24'hFFFFFF; // saturate
+        // exp(x)，其中 x = -16 + 地址 × 20/1024
+        if (地址 < 410)            // x < -8：exp极小
+            数据 = 24'd0;
+        else if (地址 < 614)       // x ∈ [-8, -4]：较小值
+            数据 = 24'(地址 - 410);
+        else if (地址 < 768)       // x ∈ [-4, -1]：递增
+            数据 = 24'((地址 - 614) * 157);
+        else if (地址 < 819)       // x ∈ [-1, 0]：接近1
+            数据 = 24'(24109 + (地址 - 768) * 813);
+        else if (地址 < 870)       // x ∈ [0, 1]：e^0=1 到 e^1≈2.718
+            数据 = 24'(65536 + (地址 - 819) * 2211);
+        else if (地址 < 922)       // x ∈ [1, 2]
+            数据 = 24'(178145 + (地址 - 870) * 5889);
+        else if (地址 < 973)       // x ∈ [2, 3]
+            数据 = 24'(484249 + (地址 - 922) * 16015);
+        else                        // x > 3：饱和
+            数据 = 24'hFFFFFF;
     end
 `else
-    // Simulation: use initial block for accurate values
-    logic [23:0] lut_mem [0:1023];
+    // ===== 仿真模式：精确计算 =====
+    logic [23:0] 查表存储器 [0:1023];
     integer _i;
     real _x, _e;
     integer _iv;
     initial begin
         for (_i = 0; _i < 1024; _i = _i + 1) begin
-            _x = -16.0 + ($itor(_i) * 20.0 / 1024.0);
-            _e = $exp(_x);
-            _iv = $rtoi(_e * 65536.0);
+            _x = -16.0 + ($itor(_i) * 20.0 / 1024.0);  // 将索引映射到实数x
+            _e = $exp(_x);                                // 计算exp(x)
+            _iv = $rtoi(_e * 65536.0);                    // 转换为定点数（×65536）
             if (_iv > 16777215)
-                lut_mem[_i] = 24'hFFFFFF;
+                查表存储器[_i] = 24'hFFFFFF;              // 饱和
             else
-                lut_mem[_i] = _iv[23:0];
+                查表存储器[_i] = _iv[23:0];
         end
     end
-    assign data = lut_mem[addr];
+    assign 数据 = 查表存储器[地址];
 `endif
 
 endmodule
