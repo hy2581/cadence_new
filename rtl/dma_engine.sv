@@ -1,262 +1,276 @@
 // ============================================================
-// DMA Engine
-// Bridges tile_controller requests to AXI4 master transactions
-// Routes read data to appropriate buffers (Q/K/V)
-// Routes O buffer data to AXI4 write channel
+// DMA引擎
+// 桥接分块控制器的读写请求与AXI4主机事务
+// 读数据路由：将AXI读回的数据分发到Q/K/V缓冲
+// 写数据路由：将O缓冲数据通过AXI写回外部存储器
 // ============================================================
-module dma_engine #(
-    parameter AXI_ADDR_WIDTH = 64,
-    parameter AXI_DATA_WIDTH = 128,
-    parameter AXI_ID_WIDTH   = 4,
-    parameter TILE_BR    = 4,
-    parameter TILE_BC    = 16,
-    parameter HEAD_DIM   = 64,
-    parameter DATA_WIDTH = 16
+module DMA引擎 #(
+    parameter AXI地址位宽   = 64,
+    parameter AXI数据位宽   = 128,
+    parameter AXI_ID位宽    = 4,
+    parameter Q分块行数     = 4,
+    parameter KV分块行数    = 16,
+    parameter 头维度        = 64,
+    parameter 数据位宽      = 16
 )(
-    input  logic                    clk,
-    input  logic                    rst_n,
+    input  logic                    时钟,
+    input  logic                    复位_低有效,
 
-    // --- AXI4 Master ports (directly to external AXI4 interface) ---
-    output logic [AXI_ID_WIDTH-1:0]    m_axi_awid,
-    output logic [AXI_ADDR_WIDTH-1:0]  m_axi_awaddr,
-    output logic [7:0]                 m_axi_awlen,
-    output logic [2:0]                 m_axi_awsize,
-    output logic [1:0]                 m_axi_awburst,
-    output logic                       m_axi_awvalid,
-    input  logic                       m_axi_awready,
-    output logic [AXI_DATA_WIDTH-1:0]  m_axi_wdata,
-    output logic [AXI_DATA_WIDTH/8-1:0] m_axi_wstrb,
-    output logic                       m_axi_wlast,
-    output logic                       m_axi_wvalid,
-    input  logic                       m_axi_wready,
-    input  logic [AXI_ID_WIDTH-1:0]    m_axi_bid,
-    input  logic [1:0]                 m_axi_bresp,
-    input  logic                       m_axi_bvalid,
-    output logic                       m_axi_bready,
-    output logic [AXI_ID_WIDTH-1:0]    m_axi_arid,
-    output logic [AXI_ADDR_WIDTH-1:0]  m_axi_araddr,
-    output logic [7:0]                 m_axi_arlen,
-    output logic [2:0]                 m_axi_arsize,
-    output logic [1:0]                 m_axi_arburst,
-    output logic                       m_axi_arvalid,
-    input  logic                       m_axi_arready,
-    input  logic [AXI_ID_WIDTH-1:0]    m_axi_rid,
-    input  logic [AXI_DATA_WIDTH-1:0]  m_axi_rdata,
-    input  logic [1:0]                 m_axi_rresp,
-    input  logic                       m_axi_rlast,
-    input  logic                       m_axi_rvalid,
-    output logic                       m_axi_rready,
+    // --- AXI4 主机端口（直连外部AXI4接口） ---
+    // 写地址通道
+    output logic [AXI_ID位宽-1:0]      主机_写地址ID,
+    output logic [AXI地址位宽-1:0]     主机_写地址,
+    output logic [7:0]                 主机_写突发长度,
+    output logic [2:0]                 主机_写突发大小,
+    output logic [1:0]                 主机_写突发类型,
+    output logic                       主机_写地址有效,
+    input  logic                       主机_写地址就绪,
+    // 写数据通道
+    output logic [AXI数据位宽-1:0]     主机_写数据,
+    output logic [AXI数据位宽/8-1:0]   主机_写选通,
+    output logic                       主机_写最后一拍,
+    output logic                       主机_写数据有效,
+    input  logic                       主机_写数据就绪,
+    // 写响应通道
+    input  logic [AXI_ID位宽-1:0]      主机_写响应ID,
+    input  logic [1:0]                 主机_写响应,
+    input  logic                       主机_写响应有效,
+    output logic                       主机_写响应就绪,
+    // 读地址通道
+    output logic [AXI_ID位宽-1:0]      主机_读地址ID,
+    output logic [AXI地址位宽-1:0]     主机_读地址,
+    output logic [7:0]                 主机_读突发长度,
+    output logic [2:0]                 主机_读突发大小,
+    output logic [1:0]                 主机_读突发类型,
+    output logic                       主机_读地址有效,
+    input  logic                       主机_读地址就绪,
+    // 读数据通道
+    input  logic [AXI_ID位宽-1:0]      主机_读数据ID,
+    input  logic [AXI数据位宽-1:0]     主机_读数据,
+    input  logic [1:0]                 主机_读响应,
+    input  logic                       主机_读最后一拍,
+    input  logic                       主机_读数据有效,
+    output logic                       主机_读数据就绪,
 
-    // --- Tile controller interface ---
-    input  logic                       dma_rd_req,
-    input  logic [AXI_ADDR_WIDTH-1:0]  dma_rd_addr,
-    input  logic [15:0]                dma_rd_len_bytes,
-    input  logic [1:0]                 dma_rd_target,   // 0=Q, 1=K, 2=V
-    output logic                       dma_rd_done,
+    // --- 分块控制器接口 ---
+    // 读请求
+    input  logic                       DMA读请求,
+    input  logic [AXI地址位宽-1:0]     DMA读地址,
+    input  logic [15:0]                DMA读长度_字节,
+    input  logic [1:0]                 DMA读目标,     // 0=Q缓冲, 1=K缓冲, 2=V缓冲
+    output logic                       DMA读完成,
+    // 写请求
+    input  logic                       DMA写请求,
+    input  logic [AXI地址位宽-1:0]     DMA写地址,
+    input  logic [15:0]                DMA写长度_字节,
+    output logic                       DMA写完成,
 
-    input  logic                       dma_wr_req,
-    input  logic [AXI_ADDR_WIDTH-1:0]  dma_wr_addr,
-    input  logic [15:0]                dma_wr_len_bytes,
-    output logic                       dma_wr_done,
+    // --- 缓冲写接口（Q/K/V写入） ---
+    output logic                       缓冲_Q写使能,
+    output logic [$clog2(Q分块行数*头维度)-1:0] 缓冲_Q写地址,
+    output logic [AXI数据位宽-1:0]     缓冲_Q写数据,
 
-    // --- Buffer write interface (Q/K/V) ---
-    output logic                       buf_q_wr_en,
-    output logic [$clog2(TILE_BR*HEAD_DIM)-1:0] buf_q_wr_addr,
-    output logic [AXI_DATA_WIDTH-1:0]  buf_q_wr_data,
+    output logic                       缓冲_K写使能,
+    output logic [$clog2(KV分块行数*头维度)-1:0] 缓冲_K写地址,
+    output logic [AXI数据位宽-1:0]     缓冲_K写数据,
 
-    output logic                       buf_k_wr_en,
-    output logic [$clog2(TILE_BC*HEAD_DIM)-1:0] buf_k_wr_addr,
-    output logic [AXI_DATA_WIDTH-1:0]  buf_k_wr_data,
+    output logic                       缓冲_V写使能,
+    output logic [$clog2(KV分块行数*头维度)-1:0] 缓冲_V写地址,
+    output logic [AXI数据位宽-1:0]     缓冲_V写数据,
 
-    output logic                       buf_v_wr_en,
-    output logic [$clog2(TILE_BC*HEAD_DIM)-1:0] buf_v_wr_addr,
-    output logic [AXI_DATA_WIDTH-1:0]  buf_v_wr_data,
+    // --- O缓冲读接口（回写时读取） ---
+    output logic                       缓冲_O读使能,
+    output logic [$clog2(Q分块行数)-1:0] 缓冲_O读行号,
+    output logic [$clog2(头维度/(AXI数据位宽/数据位宽))-1:0] 缓冲_O读列组,
+    input  logic [AXI数据位宽-1:0]     缓冲_O读数据,
 
-    // --- O buffer read interface ---
-    output logic                       buf_o_rd_en,
-    output logic [$clog2(TILE_BR)-1:0] buf_o_rd_row,
-    output logic [$clog2(HEAD_DIM/(AXI_DATA_WIDTH/DATA_WIDTH))-1:0] buf_o_rd_col_grp,
-    input  logic [AXI_DATA_WIDTH-1:0]  buf_o_rd_data,
-
-    // Buffer sel
-    input  logic                       kv_buf_sel
+    // 缓冲选择（乒乓）
+    input  logic                       KV缓冲选择
 );
 
-    localparam ELEMS_PER_BEAT = AXI_DATA_WIDTH / DATA_WIDTH;
+    localparam 每拍元素数 = AXI数据位宽 / 数据位宽;   // 128/16 = 8个元素
 
-    // AXI master instance
-    logic        axi_rd_req;
-    logic [AXI_ADDR_WIDTH-1:0] axi_rd_addr;
-    logic [15:0] axi_rd_len;
-    logic        axi_rd_done;
-    logic [AXI_DATA_WIDTH-1:0] axi_rd_data;
-    logic        axi_rd_data_valid;
+    // ========== AXI主机实例的内部信号 ==========
+    logic        AXI读请求;
+    logic [AXI地址位宽-1:0] AXI读地址;
+    logic [15:0] AXI读长度;
+    logic        AXI读完成;
+    logic [AXI数据位宽-1:0] AXI读出数据;
+    logic        AXI读出数据有效;
 
-    logic        axi_wr_req;
-    logic [AXI_ADDR_WIDTH-1:0] axi_wr_addr;
-    logic [15:0] axi_wr_len;
-    logic        axi_wr_done;
-    logic [AXI_DATA_WIDTH-1:0] axi_wr_data;
-    logic        axi_wr_data_valid;
-    logic        axi_wr_data_ready;
+    logic        AXI写请求;
+    logic [AXI地址位宽-1:0] AXI写地址;
+    logic [15:0] AXI写长度;
+    logic        AXI写完成;
+    logic [AXI数据位宽-1:0] AXI写入数据;
+    logic        AXI写入数据有效;
+    logic        AXI写入数据就绪;
 
-    axi4_master_if #(
-        .ADDR_WIDTH(AXI_ADDR_WIDTH), .DATA_WIDTH(AXI_DATA_WIDTH), .ID_WIDTH(AXI_ID_WIDTH)
-    ) u_axi_master (
-        .clk(clk), .rst_n(rst_n),
-        .m_axi_awid(m_axi_awid), .m_axi_awaddr(m_axi_awaddr), .m_axi_awlen(m_axi_awlen),
-        .m_axi_awsize(m_axi_awsize), .m_axi_awburst(m_axi_awburst),
-        .m_axi_awvalid(m_axi_awvalid), .m_axi_awready(m_axi_awready),
-        .m_axi_wdata(m_axi_wdata), .m_axi_wstrb(m_axi_wstrb),
-        .m_axi_wlast(m_axi_wlast), .m_axi_wvalid(m_axi_wvalid), .m_axi_wready(m_axi_wready),
-        .m_axi_bid(m_axi_bid), .m_axi_bresp(m_axi_bresp),
-        .m_axi_bvalid(m_axi_bvalid), .m_axi_bready(m_axi_bready),
-        .m_axi_arid(m_axi_arid), .m_axi_araddr(m_axi_araddr), .m_axi_arlen(m_axi_arlen),
-        .m_axi_arsize(m_axi_arsize), .m_axi_arburst(m_axi_arburst),
-        .m_axi_arvalid(m_axi_arvalid), .m_axi_arready(m_axi_arready),
-        .m_axi_rid(m_axi_rid), .m_axi_rdata(m_axi_rdata), .m_axi_rresp(m_axi_rresp),
-        .m_axi_rlast(m_axi_rlast), .m_axi_rvalid(m_axi_rvalid), .m_axi_rready(m_axi_rready),
-        .rd_req(axi_rd_req), .rd_addr(axi_rd_addr), .rd_len_bytes(axi_rd_len),
-        .rd_done(axi_rd_done), .rd_data(axi_rd_data), .rd_data_valid(axi_rd_data_valid),
-        .wr_req(axi_wr_req), .wr_addr(axi_wr_addr), .wr_len_bytes(axi_wr_len),
-        .wr_done(axi_wr_done), .wr_data(axi_wr_data),
-        .wr_data_valid(axi_wr_data_valid), .wr_data_ready(axi_wr_data_ready)
+    // 例化AXI4主机接口
+    AXI4主机接口 #(
+        .地址位宽(AXI地址位宽), .数据位宽(AXI数据位宽), .ID位宽(AXI_ID位宽)
+    ) 实例_AXI主机 (
+        .时钟(时钟), .复位_低有效(复位_低有效),
+        .主机_写地址ID(主机_写地址ID), .主机_写地址(主机_写地址), .主机_写突发长度(主机_写突发长度),
+        .主机_写突发大小(主机_写突发大小), .主机_写突发类型(主机_写突发类型),
+        .主机_写地址有效(主机_写地址有效), .主机_写地址就绪(主机_写地址就绪),
+        .主机_写数据(主机_写数据), .主机_写选通(主机_写选通),
+        .主机_写最后一拍(主机_写最后一拍), .主机_写数据有效(主机_写数据有效), .主机_写数据就绪(主机_写数据就绪),
+        .主机_写响应ID(主机_写响应ID), .主机_写响应(主机_写响应),
+        .主机_写响应有效(主机_写响应有效), .主机_写响应就绪(主机_写响应就绪),
+        .主机_读地址ID(主机_读地址ID), .主机_读地址(主机_读地址), .主机_读突发长度(主机_读突发长度),
+        .主机_读突发大小(主机_读突发大小), .主机_读突发类型(主机_读突发类型),
+        .主机_读地址有效(主机_读地址有效), .主机_读地址就绪(主机_读地址就绪),
+        .主机_读数据ID(主机_读数据ID), .主机_读数据(主机_读数据), .主机_读响应(主机_读响应),
+        .主机_读最后一拍(主机_读最后一拍), .主机_读数据有效(主机_读数据有效), .主机_读数据就绪(主机_读数据就绪),
+        .读请求(AXI读请求), .读地址(AXI读地址), .读长度_字节(AXI读长度),
+        .读完成(AXI读完成), .读出数据(AXI读出数据), .读出数据有效(AXI读出数据有效),
+        .写请求(AXI写请求), .写地址(AXI写地址), .写长度_字节(AXI写长度),
+        .写完成(AXI写完成), .写入数据(AXI写入数据),
+        .写入数据有效(AXI写入数据有效), .写入数据就绪(AXI写入数据就绪)
     );
 
-    // --- Read data routing ---
-    logic [1:0]  rd_target_reg;
-    logic [15:0] rd_beat_cnt;
+    // ===== 读数据路由逻辑 =====
+    // 根据读目标（Q/K/V），将AXI读回的数据写入对应缓冲
+    logic [1:0]  读目标_锁存;     // 锁存的读目标
+    logic [15:0] 读节拍计数;      // 已接收的节拍数
 
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            axi_rd_req    <= 1'b0;
-            rd_target_reg <= '0;
-            rd_beat_cnt   <= '0;
-            dma_rd_done   <= 1'b0;
-            buf_q_wr_en   <= 1'b0;
-            buf_k_wr_en   <= 1'b0;
-            buf_v_wr_en   <= 1'b0;
+    always_ff @(posedge 时钟 or negedge 复位_低有效) begin
+        if (!复位_低有效) begin
+            AXI读请求    <= 1'b0;
+            读目标_锁存  <= '0;
+            读节拍计数   <= '0;
+            DMA读完成    <= 1'b0;
+            缓冲_Q写使能 <= 1'b0;
+            缓冲_K写使能 <= 1'b0;
+            缓冲_V写使能 <= 1'b0;
         end else begin
-            dma_rd_done <= 1'b0;
-            buf_q_wr_en <= 1'b0;
-            buf_k_wr_en <= 1'b0;
-            buf_v_wr_en <= 1'b0;
+            DMA读完成    <= 1'b0;
+            缓冲_Q写使能 <= 1'b0;
+            缓冲_K写使能 <= 1'b0;
+            缓冲_V写使能 <= 1'b0;
 
-            // Capture DMA read request and hold axi_rd_req until done
-            if (dma_rd_req && !axi_rd_req) begin
-                axi_rd_req    <= 1'b1;
-                axi_rd_addr   <= dma_rd_addr;
-                axi_rd_len    <= dma_rd_len_bytes;
-                rd_target_reg <= dma_rd_target;
-                rd_beat_cnt   <= '0;
+            // 捕获DMA读请求，发起AXI读事务
+            if (DMA读请求 && !AXI读请求) begin
+                AXI读请求   <= 1'b1;
+                AXI读地址   <= DMA读地址;
+                AXI读长度   <= DMA读长度_字节;
+                读目标_锁存 <= DMA读目标;
+                读节拍计数  <= '0;
             end
-            if (axi_rd_done) begin
-                axi_rd_req <= 1'b0;
+            if (AXI读完成) begin
+                AXI读请求 <= 1'b0;
             end
 
-            if (axi_rd_data_valid) begin
-                case (rd_target_reg)
-                    2'd0: begin
-                        buf_q_wr_en   <= 1'b1;
-                        buf_q_wr_addr <= rd_beat_cnt[$clog2(TILE_BR*HEAD_DIM)-1:0];
-                        buf_q_wr_data <= axi_rd_data;
+            // 收到AXI读数据后，根据目标分发到对应缓冲
+            if (AXI读出数据有效) begin
+                case (读目标_锁存)
+                    2'd0: begin  // 目标：Q缓冲
+                        缓冲_Q写使能 <= 1'b1;
+                        缓冲_Q写地址 <= 读节拍计数[$clog2(Q分块行数*头维度)-1:0];
+                        缓冲_Q写数据 <= AXI读出数据;
                     end
-                    2'd1: begin
-                        buf_k_wr_en   <= 1'b1;
-                        buf_k_wr_addr <= rd_beat_cnt[$clog2(TILE_BC*HEAD_DIM)-1:0];
-                        buf_k_wr_data <= axi_rd_data;
+                    2'd1: begin  // 目标：K缓冲
+                        缓冲_K写使能 <= 1'b1;
+                        缓冲_K写地址 <= 读节拍计数[$clog2(KV分块行数*头维度)-1:0];
+                        缓冲_K写数据 <= AXI读出数据;
                     end
-                    2'd2: begin
-                        buf_v_wr_en   <= 1'b1;
-                        buf_v_wr_addr <= rd_beat_cnt[$clog2(TILE_BC*HEAD_DIM)-1:0];
-                        buf_v_wr_data <= axi_rd_data;
+                    2'd2: begin  // 目标：V缓冲
+                        缓冲_V写使能 <= 1'b1;
+                        缓冲_V写地址 <= 读节拍计数[$clog2(KV分块行数*头维度)-1:0];
+                        缓冲_V写数据 <= AXI读出数据;
                     end
                     default: ;
                 endcase
-                rd_beat_cnt <= rd_beat_cnt + 1;
+                读节拍计数 <= 读节拍计数 + 1;
             end
 
-            if (axi_rd_done)
-                dma_rd_done <= 1'b1;
+            if (AXI读完成)
+                DMA读完成 <= 1'b1;
         end
     end
 
-    // --- Write data routing (O buffer → AXI) ---
-    // Simplified: just signal done immediately (O data already in buffer)
-    // For proper operation, we'd need to stream buffer contents through AXI.
-    // Simplified approach: mark write done after a fixed delay to allow
-    // the top-level FSM to proceed. Full AXI write implementation TBD.
-    localparam O_COLS_PER_BEAT = AXI_DATA_WIDTH / DATA_WIDTH;
-    localparam O_BEATS_PER_ROW = HEAD_DIM / O_COLS_PER_BEAT;
-    localparam O_TOTAL_BEATS = TILE_BR * O_BEATS_PER_ROW;
+    // ===== 写数据路由逻辑（O缓冲 → AXI写通道） =====
+    localparam O每拍列数   = AXI数据位宽 / 数据位宽;       // 每拍传8个元素
+    localparam O每行节拍数 = 头维度 / O每拍列数;            // 64/8 = 8拍/行
+    localparam O总节拍数   = Q分块行数 * O每行节拍数;       // 4×8 = 32拍
 
-    logic [15:0] wr_beat_cnt;
-    logic        wr_active;
+    logic [15:0] 写节拍计数;
+    logic        写活动;
 
-    typedef enum logic [1:0] { WR_IDLE, WR_ADDR, WR_DATA, WR_FINISH } wr_state_t;
-    wr_state_t wr_state;
+    typedef enum logic [1:0] {
+        写_空闲,       // 等待写请求
+        写_发地址,     // 等待AXI写地址被接受
+        写_发送数据,   // 从O缓冲读数据并发送
+        写_结束        // 等待AXI写完成
+    } 写状态类型;
+    写状态类型 写状态;
 
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            wr_state          <= WR_IDLE;
-            axi_wr_req        <= 1'b0;
-            dma_wr_done       <= 1'b0;
-            wr_beat_cnt       <= '0;
-            wr_active         <= 1'b0;
-            axi_wr_data_valid <= 1'b0;
-            axi_wr_data       <= '0;
-            buf_o_rd_en       <= 1'b0;
+    always_ff @(posedge 时钟 or negedge 复位_低有效) begin
+        if (!复位_低有效) begin
+            写状态          <= 写_空闲;
+            AXI写请求       <= 1'b0;
+            DMA写完成       <= 1'b0;
+            写节拍计数      <= '0;
+            写活动          <= 1'b0;
+            AXI写入数据有效 <= 1'b0;
+            AXI写入数据     <= '0;
+            缓冲_O读使能    <= 1'b0;
         end else begin
-            dma_wr_done       <= 1'b0;
-            buf_o_rd_en       <= 1'b0;
-            axi_wr_data_valid <= 1'b0;
+            DMA写完成       <= 1'b0;
+            缓冲_O读使能    <= 1'b0;
+            AXI写入数据有效 <= 1'b0;
 
-            case (wr_state)
-                WR_IDLE: begin
-                    if (dma_wr_req) begin
-                        axi_wr_req  <= 1'b1;
-                        axi_wr_addr <= dma_wr_addr;
-                        axi_wr_len  <= dma_wr_len_bytes;
-                        wr_beat_cnt <= '0;
-                        wr_state    <= WR_ADDR;
+            case (写状态)
+                // ---- 空闲：等待DMA写请求 ----
+                写_空闲: begin
+                    if (DMA写请求) begin
+                        AXI写请求  <= 1'b1;
+                        AXI写地址  <= DMA写地址;
+                        AXI写长度  <= DMA写长度_字节;
+                        写节拍计数 <= '0;
+                        写状态     <= 写_发地址;
                     end
                 end
 
-                WR_ADDR: begin
-                    // Setup first read address
-                    buf_o_rd_en      <= 1'b1;
-                    buf_o_rd_row     <= '0;
-                    buf_o_rd_col_grp <= '0;
-                    if (axi_wr_data_ready)
-                        wr_state <= WR_DATA;
+                // ---- 发地址：预读第一个O缓冲数据 ----
+                写_发地址: begin
+                    缓冲_O读使能 <= 1'b1;
+                    缓冲_O读行号 <= '0;
+                    缓冲_O读列组 <= '0;
+                    if (AXI写入数据就绪)
+                        写状态 <= 写_发送数据;
                 end
 
-                WR_DATA: begin
-                    if (axi_wr_data_ready) begin
-                        axi_wr_data       <= buf_o_rd_data;
-                        axi_wr_data_valid <= 1'b1;
-                        wr_beat_cnt       <= wr_beat_cnt + 1;
+                // ---- 发送数据：从O缓冲逐拍读出并发送 ----
+                写_发送数据: begin
+                    if (AXI写入数据就绪) begin
+                        AXI写入数据     <= 缓冲_O读数据;
+                        AXI写入数据有效 <= 1'b1;
+                        写节拍计数      <= 写节拍计数 + 1;
 
-                        // Pre-read next beat
-                        if (wr_beat_cnt + 1 < O_TOTAL_BEATS) begin
-                            buf_o_rd_en      <= 1'b1;
-                            buf_o_rd_row     <= (wr_beat_cnt + 1) / O_BEATS_PER_ROW;
-                            buf_o_rd_col_grp <= (wr_beat_cnt + 1) % O_BEATS_PER_ROW;
+                        // 预读下一拍数据
+                        if (写节拍计数 + 1 < O总节拍数) begin
+                            缓冲_O读使能 <= 1'b1;
+                            缓冲_O读行号 <= (写节拍计数 + 1) / O每行节拍数;
+                            缓冲_O读列组 <= (写节拍计数 + 1) % O每行节拍数;
                         end
 
-                        if (wr_beat_cnt == O_TOTAL_BEATS - 1)
-                            wr_state <= WR_FINISH;
+                        // 发送完最后一拍
+                        if (写节拍计数 == O总节拍数 - 1)
+                            写状态 <= 写_结束;
                     end else begin
-                        axi_wr_data_valid <= 1'b0;
+                        AXI写入数据有效 <= 1'b0;
                     end
                 end
 
-                WR_FINISH: begin
-                    axi_wr_data_valid <= 1'b0;
-                    if (axi_wr_done) begin
-                        dma_wr_done <= 1'b1;
-                        axi_wr_req  <= 1'b0;
-                        wr_state    <= WR_IDLE;
+                // ---- 结束：等待AXI写完成 ----
+                写_结束: begin
+                    AXI写入数据有效 <= 1'b0;
+                    if (AXI写完成) begin
+                        DMA写完成 <= 1'b1;
+                        AXI写请求 <= 1'b0;
+                        写状态    <= 写_空闲;
                     end
                 end
             endcase
