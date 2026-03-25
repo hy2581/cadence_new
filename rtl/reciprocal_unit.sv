@@ -1,134 +1,138 @@
 // ============================================================
-// Reciprocal Approximation Unit (Newton-Raphson)
-// Computes 1/x for unsigned fixed-point input
-// Method: LUT initial guess + 2 Newton-Raphson iterations
-//   x_{n+1} = x_n * (2 - d * x_n)
+// 倒数近似单元（牛顿-拉夫逊迭代法）
+// 计算无符号定点数的 1/x
+// 方法：查找表初始猜测 + 2次牛顿迭代
+//   迭代公式：x_{n+1} = x_n × (2 - d × x_n)
+//   每次迭代精度翻倍
+// 4级流水线：前导零计数 → 查表初始值 → 牛顿迭代1 → 牛顿迭代2
 // ============================================================
-module reciprocal_unit #(
-    parameter WIDTH     = 40,
-    parameter FRAC_BITS = 16
+module 倒数近似单元 #(
+    parameter 位宽     = 40,
+    parameter 小数位数 = 16
 )(
-    input  logic                 clk,
-    input  logic                 rst_n,
-    input  logic                 valid_in,
-    input  logic [WIDTH-1:0]     d_in,          // unsigned fixed-point denominator
-    output logic                 valid_out,
-    output logic [WIDTH-1:0]     recip_out       // unsigned fixed-point ≈ 1/d_in
+    input  logic                 时钟,
+    input  logic                 复位_低有效,
+    input  logic                 输入有效,
+    input  logic [位宽-1:0]      被除数,         // 无符号定点数输入（即分母d）
+    output logic                 输出有效,
+    output logic [位宽-1:0]      倒数输出         // 无符号定点数 ≈ 1/被除数
 );
 
-    // --- LUT for initial guess ---
-    // Normalize d_in to [0.5, 1.0) by finding leading one, then use top 8 bits as LUT index
-    // LUT stores 1/x * 2^FRAC_BITS for normalized x
+    // ===== 初始猜测查找表 =====
+    // 将被除数归一化到 [0.5, 1.0) 范围，用高8位作为索引
+    // 查找表存储 1/x × 2^小数位数（归一化x的倒数）
 
-    localparam LUT_DEPTH = 256;
-    logic [WIDTH-1:0] recip_lut [0:LUT_DEPTH-1];
+    localparam 查找表深度 = 256;
+    logic [位宽-1:0] 倒数查找表 [0:查找表深度-1];
 
     integer _ri;
     initial begin
-        for (_ri = 0; _ri < LUT_DEPTH; _ri = _ri + 1) begin
-            recip_lut[_ri] = WIDTH'(int'((1.0 / (0.5 + (real'(_ri) / real'(LUT_DEPTH)) * 0.5)) * (2.0 ** FRAC_BITS) + 0.5));
+        for (_ri = 0; _ri < 查找表深度; _ri = _ri + 1) begin
+            // x = 0.5 + (_ri/256)*0.5，计算 1/x 并转为定点数
+            倒数查找表[_ri] = 位宽'(int'((1.0 / (0.5 + (real'(_ri) / real'(查找表深度)) * 0.5)) * (2.0 ** 小数位数) + 0.5));
         end
     end
 
-    // Stage 1: find leading one and normalize
-    logic valid_s1;
-    logic [$clog2(WIDTH)-1:0] lz_count;
-    logic [WIDTH-1:0] d_norm;
-    logic [WIDTH-1:0] d_saved;
-    logic [$clog2(WIDTH)-1:0] shift_amt;
+    // ===== 第1级：前导零计数 + 归一化 =====
+    logic 第1级有效;
+    logic [$clog2(位宽)-1:0] 前导零数;
+    logic [位宽-1:0] 归一化值;           // 左移后的被除数
+    logic [位宽-1:0] 被除数_保存;        // 原始被除数
+    logic [$clog2(位宽)-1:0] 移位量;
 
-    function automatic [$clog2(WIDTH)-1:0] count_leading_zeros(input [WIDTH-1:0] val);
-        for (int i = WIDTH-1; i >= 0; i--) begin
-            if (val[i]) return $clog2(WIDTH)'(WIDTH - 1 - i);
+    // 前导零计数函数：找到最高位的1
+    function automatic [$clog2(位宽)-1:0] 计算前导零数(input [位宽-1:0] 值);
+        for (int i = 位宽-1; i >= 0; i--) begin
+            if (值[i]) return $clog2(位宽)'(位宽 - 1 - i);
         end
-        return $clog2(WIDTH)'(WIDTH);
+        return $clog2(位宽)'(位宽);
     endfunction
 
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            valid_s1  <= 1'b0;
-            d_norm    <= '0;
-            d_saved   <= '0;
-            shift_amt <= '0;
+    always_ff @(posedge 时钟 or negedge 复位_低有效) begin
+        if (!复位_低有效) begin
+            第1级有效   <= 1'b0;
+            归一化值    <= '0;
+            被除数_保存 <= '0;
+            移位量      <= '0;
         end else begin
-            valid_s1 <= valid_in;
-            d_saved  <= d_in;
-            lz_count  = count_leading_zeros(d_in);
-            shift_amt <= lz_count;
-            d_norm    <= d_in << lz_count;
+            第1级有效    <= 输入有效;
+            被除数_保存  <= 被除数;
+            前导零数      = 计算前导零数(被除数);
+            移位量       <= 前导零数;
+            归一化值     <= 被除数 << 前导零数;  // 左移使最高位为1
         end
     end
 
-    // Stage 2: LUT lookup for initial guess
-    logic valid_s2;
-    logic [WIDTH-1:0] x0;
-    logic [WIDTH-1:0] d_s2;
-    logic [$clog2(WIDTH)-1:0] shift_s2;
-    logic [7:0] lut_idx;
+    // ===== 第2级：查表获取初始猜测值 =====
+    logic 第2级有效;
+    logic [位宽-1:0] 初始猜测;           // x0
+    logic [位宽-1:0] 被除数_第2级;
+    logic [$clog2(位宽)-1:0] 移位量_第2级;
+    logic [7:0] 查表索引;
 
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            valid_s2 <= 1'b0;
-            x0       <= '0;
-            d_s2     <= '0;
-            shift_s2 <= '0;
+    always_ff @(posedge 时钟 or negedge 复位_低有效) begin
+        if (!复位_低有效) begin
+            第2级有效    <= 1'b0;
+            初始猜测     <= '0;
+            被除数_第2级 <= '0;
+            移位量_第2级 <= '0;
         end else begin
-            valid_s2 <= valid_s1;
-            d_s2     <= d_saved;
-            shift_s2 <= shift_amt;
-            lut_idx   = d_norm[WIDTH-1 -: 8];
-            x0       <= recip_lut[lut_idx] << shift_amt;
+            第2级有效    <= 第1级有效;
+            被除数_第2级 <= 被除数_保存;
+            移位量_第2级 <= 移位量;
+            查表索引      = 归一化值[位宽-1 -: 8];       // 取高8位作为索引
+            初始猜测     <= 倒数查找表[查表索引] << 移位量;  // 按移位量放大
         end
     end
 
-    // Stage 3: Newton-Raphson iteration 1
-    // x1 = x0 * (2 - d * x0)
-    logic valid_s3;
-    logic [WIDTH-1:0] x1;
-    logic [WIDTH-1:0] d_s3;
-    logic [2*WIDTH-1:0] d_x0;
-    logic [WIDTH-1:0] two_minus;
-    logic [2*WIDTH-1:0] x1_full;
+    // ===== 第3级：牛顿迭代第1次 =====
+    // x1 = x0 × (2 - d × x0)
+    logic 第3级有效;
+    logic [位宽-1:0] 迭代1_结果;         // x1
+    logic [位宽-1:0] 被除数_第3级;
+    logic [2*位宽-1:0] d乘x0;
+    logic [位宽-1:0] 二减dx0;
+    logic [2*位宽-1:0] x1_全精度;
 
-    localparam [WIDTH-1:0] TWO_FP = WIDTH'(2) << FRAC_BITS;
+    localparam [位宽-1:0] 定点数_二 = 位宽'(2) << 小数位数;  // 2.0的定点表示
 
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            valid_s3 <= 1'b0;
-            x1       <= '0;
-            d_s3     <= '0;
+    always_ff @(posedge 时钟 or negedge 复位_低有效) begin
+        if (!复位_低有效) begin
+            第3级有效    <= 1'b0;
+            迭代1_结果   <= '0;
+            被除数_第3级 <= '0;
         end else begin
-            valid_s3  <= valid_s2;
-            d_s3      <= d_s2;
-            d_x0       = (d_s2 * x0) >> FRAC_BITS;
-            two_minus  = TWO_FP - d_x0[WIDTH-1:0];
-            x1_full    = (x0 * two_minus) >> FRAC_BITS;
-            x1        <= x1_full[WIDTH-1:0];
+            第3级有效    <= 第2级有效;
+            被除数_第3级 <= 被除数_第2级;
+            d乘x0        = (被除数_第2级 * 初始猜测) >> 小数位数;       // d × x0
+            二减dx0      = 定点数_二 - d乘x0[位宽-1:0];                // 2 - d×x0
+            x1_全精度    = (初始猜测 * 二减dx0) >> 小数位数;            // x0 × (2 - d×x0)
+            迭代1_结果   <= x1_全精度[位宽-1:0];
         end
     end
 
-    // Stage 4: Newton-Raphson iteration 2
-    // x2 = x1 * (2 - d * x1)
-    logic valid_s4;
-    logic [WIDTH-1:0] x2;
-    logic [2*WIDTH-1:0] d_x1;
-    logic [WIDTH-1:0] two_minus2;
-    logic [2*WIDTH-1:0] x2_full;
+    // ===== 第4级：牛顿迭代第2次 =====
+    // x2 = x1 × (2 - d × x1)
+    logic 第4级有效;
+    logic [位宽-1:0] 迭代2_结果;         // x2（最终结果）
+    logic [2*位宽-1:0] d乘x1;
+    logic [位宽-1:0] 二减dx1;
+    logic [2*位宽-1:0] x2_全精度;
 
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            valid_s4 <= 1'b0;
-            x2       <= '0;
+    always_ff @(posedge 时钟 or negedge 复位_低有效) begin
+        if (!复位_低有效) begin
+            第4级有效  <= 1'b0;
+            迭代2_结果 <= '0;
         end else begin
-            valid_s4   <= valid_s3;
-            d_x1        = (d_s3 * x1) >> FRAC_BITS;
-            two_minus2  = TWO_FP - d_x1[WIDTH-1:0];
-            x2_full     = (x1 * two_minus2) >> FRAC_BITS;
-            x2         <= x2_full[WIDTH-1:0];
+            第4级有效   <= 第3级有效;
+            d乘x1       = (被除数_第3级 * 迭代1_结果) >> 小数位数;     // d × x1
+            二减dx1     = 定点数_二 - d乘x1[位宽-1:0];                // 2 - d×x1
+            x2_全精度   = (迭代1_结果 * 二减dx1) >> 小数位数;          // x1 × (2 - d×x1)
+            迭代2_结果  <= x2_全精度[位宽-1:0];
         end
     end
 
-    assign valid_out = valid_s4;
-    assign recip_out = x2;
+    assign 输出有效 = 第4级有效;
+    assign 倒数输出 = 迭代2_结果;
 
 endmodule
