@@ -1,0 +1,24 @@
+.vscode/
+
+# logs / databases
+*.log
+*.db
+*.sdb
+
+# keys / credentials
+*.key
+
+# build/sim artifacts (often huge / platform-specific)
+csrc/
+*.so
+*.dll
+*.dylib
+*.o
+*.obj
+*.a
+*.lib
+*.exe
+
+# archives
+*.zip
+
