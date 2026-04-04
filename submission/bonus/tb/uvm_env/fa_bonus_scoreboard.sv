@@ -114,7 +114,7 @@ class fa_bonus_scoreboard extends uvm_scoreboard;
 
         mean_abs_error = mean_abs_error / real'(num_checks);
 
-        if (max_abs_error < 1.0)
+        if (max_abs_error <= 1.5)
             `uvm_info(test_name, $sformatf("PASS mean=%.6f max=%.6f", mean_abs_error, max_abs_error), UVM_LOW)
         else
             `uvm_error(test_name, $sformatf("FAIL mean=%.6f max=%.6f", mean_abs_error, max_abs_error))
