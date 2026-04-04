@@ -1,6 +1,6 @@
 // ============================================================
 // FlashAttention Bonus Coverage Collector
-// Covers all 9 bonus features
+// Covers all 9 bonus features + performance + VP tracking
 // ============================================================
 
 class fa_bonus_coverage extends uvm_subscriber #(axi4_lite_txn);
@@ -10,6 +10,8 @@ class fa_bonus_coverage extends uvm_subscriber #(axi4_lite_txn);
     bit [2:0] data_fmt;
     bit [7:0] num_heads;
     bit task_queue_en;
+    int cycle_count;
+    real rd_bw, wr_bw, bus_util;
 
     covergroup bonus_config_cg;
         causal_cp:    coverpoint causal_en    { bins on = {1}; bins off = {0}; }
@@ -55,10 +57,40 @@ class fa_bonus_coverage extends uvm_subscriber #(axi4_lite_txn);
         rw_cp: coverpoint is_write { bins read = {0}; bins write = {1}; }
     endgroup
 
+    covergroup bonus_perf_cg;
+        cycles_cp: coverpoint cycle_count {
+            bins fast    = {[0:200000]};
+            bins normal  = {[200001:400000]};
+            bins slow    = {[400001:600000]};
+            bins very_slow = {[600001:$]};
+        }
+    endgroup
+
+    covergroup bonus_perf_detail_cg;
+        rd_bw_cp: coverpoint rd_bw {
+            bins low   = {[0:100]};
+            bins med   = {[101:200]};
+            bins high  = {[201:$]};
+        }
+        wr_bw_cp: coverpoint wr_bw {
+            bins low   = {[0:50]};
+            bins med   = {[51:100]};
+            bins high  = {[101:$]};
+        }
+    endgroup
+
+    string vp_hits[string];
+    covergroup bonus_vp_cg;
+        option.per_instance = 1;
+    endgroup
+
     function new(string name, uvm_component parent);
         super.new(name, parent);
         bonus_config_cg = new();
         bonus_reg_cg = new();
+        bonus_perf_cg = new();
+        bonus_perf_detail_cg = new();
+        bonus_vp_cg = new();
     endfunction
 
     function void write(axi4_lite_txn t);
@@ -77,8 +109,26 @@ class fa_bonus_coverage extends uvm_subscriber #(axi4_lite_txn);
         bonus_config_cg.sample();
     endfunction
 
+    function void sample_perf(int cycles);
+        cycle_count = cycles;
+        bonus_perf_cg.sample();
+    endfunction
+
+    function void sample_perf_detail(real _rd_bw, real _wr_bw, real _util);
+        rd_bw    = _rd_bw;
+        wr_bw    = _wr_bw;
+        bus_util = _util;
+        bonus_perf_detail_cg.sample();
+    endfunction
+
+    function void sample_vp(string vp_name);
+        vp_hits[vp_name] = "hit";
+    endfunction
+
     function void report_phase(uvm_phase phase);
-        `uvm_info("BCOV", $sformatf("Bonus Coverage: config=%.1f%%, reg=%.1f%%",
-            bonus_config_cg.get_coverage(), bonus_reg_cg.get_coverage()), UVM_LOW)
+        `uvm_info("BCOV", $sformatf("Coverage: config=%.1f%%  reg=%.1f%%  perf=%.1f%%",
+            bonus_config_cg.get_coverage(),
+            bonus_reg_cg.get_coverage(),
+            bonus_perf_cg.get_coverage()), UVM_LOW)
     endfunction
 endclass
