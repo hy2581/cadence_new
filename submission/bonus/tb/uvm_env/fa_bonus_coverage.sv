@@ -11,7 +11,7 @@ class fa_bonus_coverage extends uvm_subscriber #(axi4_lite_txn);
     bit [7:0] num_heads;
     bit task_queue_en;
     int cycle_count;
-    real rd_bw, wr_bw, bus_util;
+    int rd_bw_int, wr_bw_int;
 
     covergroup bonus_config_cg;
         causal_cp:    coverpoint causal_en    { bins on = {1}; bins off = {0}; }
@@ -67,12 +67,12 @@ class fa_bonus_coverage extends uvm_subscriber #(axi4_lite_txn);
     endgroup
 
     covergroup bonus_perf_detail_cg;
-        rd_bw_cp: coverpoint rd_bw {
+        rd_bw_cp: coverpoint rd_bw_int {
             bins low   = {[0:100]};
             bins med   = {[101:200]};
             bins high  = {[201:$]};
         }
-        wr_bw_cp: coverpoint wr_bw {
+        wr_bw_cp: coverpoint wr_bw_int {
             bins low   = {[0:50]};
             bins med   = {[51:100]};
             bins high  = {[101:$]};
@@ -115,9 +115,8 @@ class fa_bonus_coverage extends uvm_subscriber #(axi4_lite_txn);
     endfunction
 
     function void sample_perf_detail(real _rd_bw, real _wr_bw, real _util);
-        rd_bw    = _rd_bw;
-        wr_bw    = _wr_bw;
-        bus_util = _util;
+        rd_bw_int = int'(_rd_bw);
+        wr_bw_int = int'(_wr_bw);
         bonus_perf_detail_cg.sample();
     endfunction
 
