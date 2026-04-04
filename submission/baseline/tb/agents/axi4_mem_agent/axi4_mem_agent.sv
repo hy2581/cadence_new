@@ -1,5 +1,28 @@
 // AXI4 Memory Agent — Slave responder simulating external memory
 // Uses associative array for large address space
+
+// AXI4 burst transaction for monitoring
+class axi4_burst_txn extends uvm_sequence_item;
+    `uvm_object_utils(axi4_burst_txn)
+
+    bit [63:0]  addr;
+    bit [7:0]   len;
+    bit [2:0]   size;
+    bit [1:0]   burst;
+    bit [3:0]   id;
+    bit         is_write;
+    int         byte_count;
+
+    function new(string name = "axi4_burst_txn");
+        super.new(name);
+    endfunction
+
+    function string convert2string();
+        return $sformatf("%s id=%0d addr=0x%016h len=%0d size=%0d bytes=%0d",
+                         is_write ? "WR" : "RD", id, addr, len, size, byte_count);
+    endfunction
+endclass
+
 class axi4_mem_agent extends uvm_component;
     `uvm_component_utils(axi4_mem_agent)
 
@@ -23,12 +46,13 @@ class axi4_mem_agent extends uvm_component;
     endfunction
 
     task run_phase(uvm_phase phase);
-        // Initialize handshake signals
         vif.m_axi_arready <= 1'b0;
         vif.m_axi_rvalid  <= 1'b0;
         vif.m_axi_awready <= 1'b0;
         vif.m_axi_wready  <= 1'b0;
         vif.m_axi_bvalid  <= 1'b0;
+        wait(vif.rst_n === 1'b1);
+        @(posedge vif.clk);
         fork
             handle_reads();
             handle_writes();
@@ -45,7 +69,6 @@ class axi4_mem_agent extends uvm_component;
         else return 8'h00;
     endfunction
 
-    // Write a 16-bit value (little-endian)
     function void write_half(bit [63:0] addr, bit [15:0] data);
         write_byte(addr,     data[7:0]);
         write_byte(addr + 1, data[15:8]);
@@ -55,16 +78,14 @@ class axi4_mem_agent extends uvm_component;
         return {read_byte(addr + 1), read_byte(addr)};
     endfunction
 
-    // Preload Q/K/V matrices
-    function void preload_matrix(bit [63:0] base_addr, int rows, int cols,
-                                  shortint data[][]);
+    function void preload_matrix(input bit [63:0] base_addr, input int rows, input int cols,
+                                  input shortint data[][]);
         for (int r = 0; r < rows; r++)
             for (int c = 0; c < cols; c++)
                 write_half(base_addr + (r * cols + c) * 2, data[r][c]);
     endfunction
 
-    // Read back O matrix
-    function void readback_matrix(bit [63:0] base_addr, int rows, int cols,
+    function void readback_matrix(input bit [63:0] base_addr, input int rows, input int cols,
                                    ref shortint data[][]);
         data = new[rows];
         for (int r = 0; r < rows; r++) begin
@@ -74,6 +95,18 @@ class axi4_mem_agent extends uvm_component;
         end
     endfunction
 
+    function void clear_region(bit [63:0] base_addr, int num_bytes);
+        for (int i = 0; i < num_bytes; i++)
+            if (mem.exists(base_addr + i)) mem.delete(base_addr + i);
+    endfunction
+
+    function int count_nonzero_region(bit [63:0] base_addr, int num_halfwords);
+        int cnt = 0;
+        for (int i = 0; i < num_halfwords; i++)
+            if (read_half(base_addr + i * 2) != 0) cnt++;
+        return cnt;
+    endfunction
+
     // --- AXI4 Read Response ---
     task handle_reads();
         forever begin
@@ -81,7 +114,6 @@ class axi4_mem_agent extends uvm_component;
             int        burst_len;
             int        beat_size;
 
-            // Wait for read address
             @(posedge vif.clk);
             while (!vif.m_axi_arvalid) @(posedge vif.clk);
 
@@ -93,7 +125,6 @@ class axi4_mem_agent extends uvm_component;
             @(posedge vif.clk);
             vif.m_axi_arready <= 1'b0;
 
-            // Send read data beats
             for (int i = 0; i < burst_len; i++) begin
                 logic [127:0] rdata;
                 for (int b = 0; b < beat_size; b++)
@@ -133,7 +164,6 @@ class axi4_mem_agent extends uvm_component;
             @(posedge vif.clk);
             vif.m_axi_awready <= 1'b0;
 
-            // Accept write data beats
             for (int i = 0; i < burst_len; i++) begin
                 vif.m_axi_wready <= 1'b1;
                 @(posedge vif.clk);
@@ -147,7 +177,6 @@ class axi4_mem_agent extends uvm_component;
             end
             vif.m_axi_wready <= 1'b0;
 
-            // Send write response
             vif.m_axi_bid    <= 4'd0;
             vif.m_axi_bresp  <= 2'b00;
             vif.m_axi_bvalid <= 1'b1;

@@ -1,4 +1,4 @@
-// FlashAttention UVM Environment Package
+// FlashAttention UVM Environment Package — Enhanced
 package fa_env_pkg;
     import uvm_pkg::*;
     `include "uvm_macros.svh"
@@ -11,6 +11,7 @@ package fa_env_pkg;
 
     `include "agents/axi4_mem_agent/axi4_mem_agent.sv"
 
+    `include "uvm_env/fa_reg_model.sv"
     `include "uvm_env/fa_scoreboard.sv"
     `include "uvm_env/fa_coverage.sv"
     `include "uvm_env/fa_env.sv"

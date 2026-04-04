@@ -16,6 +16,8 @@ class axi4_lite_driver extends uvm_driver #(axi4_lite_txn);
 
     task run_phase(uvm_phase phase);
         axi4_lite_txn txn;
+        wait(vif.rst_n === 1'b1);
+        @(posedge vif.clk);
         forever begin
             seq_item_port.get_next_item(txn);
             drive_txn(txn);

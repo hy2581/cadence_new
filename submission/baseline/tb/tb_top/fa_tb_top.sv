@@ -1,5 +1,6 @@
 // ============================================================
 // FlashAttention — UVM Testbench Top
+// AXI protocol checkers always enabled
 // ============================================================
 `timescale 1ns/1ps
 
@@ -87,7 +88,68 @@ module fa_tb_top;
         .irq()
     );
 
-    // Register interfaces in config_db
+    // ========== Protocol Checkers ==========
+`ifdef ENABLE_PROTOCOL_CHECK
+    axi4_lite_protocol_checker #(
+        .ADDR_WIDTH(8), .DATA_WIDTH(32)
+    ) u_axil_checker (
+        .clk(clk), .rst_n(rst_n),
+        .awaddr  (axil_if.s_axil_awaddr),
+        .awvalid (axil_if.s_axil_awvalid),
+        .awready (axil_if.s_axil_awready),
+        .wdata   (axil_if.s_axil_wdata),
+        .wstrb   (axil_if.s_axil_wstrb),
+        .wvalid  (axil_if.s_axil_wvalid),
+        .wready  (axil_if.s_axil_wready),
+        .bresp   (axil_if.s_axil_bresp),
+        .bvalid  (axil_if.s_axil_bvalid),
+        .bready  (axil_if.s_axil_bready),
+        .araddr  (axil_if.s_axil_araddr),
+        .arvalid (axil_if.s_axil_arvalid),
+        .arready (axil_if.s_axil_arready),
+        .rdata   (axil_if.s_axil_rdata),
+        .rresp   (axil_if.s_axil_rresp),
+        .rvalid  (axil_if.s_axil_rvalid),
+        .rready  (axil_if.s_axil_rready)
+    );
+
+    axi4_protocol_checker #(
+        .ADDR_WIDTH(64), .DATA_WIDTH(128), .ID_WIDTH(4)
+    ) u_axi_checker (
+        .clk(clk), .rst_n(rst_n),
+        .awid    (mem_if.m_axi_awid),
+        .awaddr  (mem_if.m_axi_awaddr),
+        .awlen   (mem_if.m_axi_awlen),
+        .awsize  (mem_if.m_axi_awsize),
+        .awburst (mem_if.m_axi_awburst),
+        .awvalid (mem_if.m_axi_awvalid),
+        .awready (mem_if.m_axi_awready),
+        .wdata   (mem_if.m_axi_wdata),
+        .wstrb   (mem_if.m_axi_wstrb),
+        .wlast   (mem_if.m_axi_wlast),
+        .wvalid  (mem_if.m_axi_wvalid),
+        .wready  (mem_if.m_axi_wready),
+        .bid     (mem_if.m_axi_bid),
+        .bresp   (mem_if.m_axi_bresp),
+        .bvalid  (mem_if.m_axi_bvalid),
+        .bready  (mem_if.m_axi_bready),
+        .arid    (mem_if.m_axi_arid),
+        .araddr  (mem_if.m_axi_araddr),
+        .arlen   (mem_if.m_axi_arlen),
+        .arsize  (mem_if.m_axi_arsize),
+        .arburst (mem_if.m_axi_arburst),
+        .arvalid (mem_if.m_axi_arvalid),
+        .arready (mem_if.m_axi_arready),
+        .rid     (mem_if.m_axi_rid),
+        .rdata   (mem_if.m_axi_rdata),
+        .rresp   (mem_if.m_axi_rresp),
+        .rlast   (mem_if.m_axi_rlast),
+        .rvalid  (mem_if.m_axi_rvalid),
+        .rready  (mem_if.m_axi_rready)
+    );
+`endif
+
+    // ========== Config DB ==========
     initial begin
         uvm_config_db#(virtual axi4_lite_if)::set(null, "*axil_agent*", "vif", axil_if);
         uvm_config_db#(virtual axi4_mem_if)::set(null, "*mem_agent*", "vif", mem_if);
@@ -113,16 +175,13 @@ module fa_tb_top;
 
     // Simulation timeout
     initial begin
-        #10_000_000;
+        #20_000_000;
         `uvm_fatal("TIMEOUT", "Simulation timeout!")
     end
 
+
     // Dump waveforms
     initial begin
-        if ($test$plusargs("DUMP_FSDB")) begin
-            $fsdbDumpfile("wave.fsdb");
-            $fsdbDumpvars(0, fa_tb_top);
-        end
         if ($test$plusargs("DUMP_VCD")) begin
             $dumpfile("wave.vcd");
             $dumpvars(0, fa_tb_top);
