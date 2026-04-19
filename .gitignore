@@ -1,0 +1,36 @@
+.vscode/
+
+# python
+__pycache__/
+*.pyc
+
+# 讲义（本地学习材料，不入仓）
+讲义/
+
+# cadence_runner runtime state
+tools/sky130_synth/
+tools/sky130_synth.tar.gz
+*.tar.gz
+
+# logs / databases
+*.log
+*.db
+*.sdb
+
+# keys / credentials
+*.key
+
+# build/sim artifacts (often huge / platform-specific)
+csrc/
+*.so
+*.dll
+*.dylib
+*.o
+*.obj
+*.a
+*.lib
+*.exe
+
+# archives
+*.zip
+
