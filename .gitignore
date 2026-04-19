@@ -1,5 +1,14 @@
 .vscode/
 
+# python
+__pycache__/
+*.pyc
+
+# cadence_runner runtime state
+tools/sky130_synth/
+tools/sky130_synth.tar.gz
+*.tar.gz
+
 # logs / databases
 *.log
 *.db
