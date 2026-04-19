@@ -800,10 +800,17 @@ def remote_peek(cfg: dict) -> None:
             close_context(ctx)
 
 
-def remote_exec(cfg: dict, cmd: str, after_ms: int = 4000) -> None:
+def remote_exec(cfg: dict, cmd: str, after_ms: int = 4000,
+                open_term: bool = False) -> None:
     """Attach, focus the terminal, run a bash one-liner via base64. Caller's
     shell on the remote VM is tcsh, so we always wrap with `bash -c` and ship
     the actual command as base64 to dodge quoting/escape headaches.
+
+    If ``open_term`` is True, right-click the desktop and pick "Open in
+    Terminal" before typing the command. Use this after a fresh remote-session
+    boot, when the Mate Desktop has no terminal window for our (350, 200)
+    click to land on (otherwise Ctrl+C lands on the empty desktop, focus is
+    lost, and the command goes nowhere).
     """
     b64 = base64.b64encode(cmd.encode()).decode()
     # tcsh-safe: no $() / no 2>&1 in the wrapper itself. Pipe base64 -> bash.
@@ -813,8 +820,15 @@ def remote_exec(cfg: dict, cmd: str, after_ms: int = 4000) -> None:
         page = ctx.new_page()
         try:
             d = Desktop.attach(page, cfg)
-            d.click(350, 200)
-            d.page.wait_for_timeout(600)
+            if open_term:
+                log("open_term=True: spawning a fresh Mate Terminal first")
+                d.open_terminal()
+                d.page.wait_for_timeout(1500)
+                d.click(400, 250)
+                d.page.wait_for_timeout(500)
+            else:
+                d.click(350, 200)
+                d.page.wait_for_timeout(600)
             d.page.keyboard.press("Control+c")
             d.page.wait_for_timeout(200)
             d.run_cmd(wrapper, after_ms=after_ms)
@@ -957,6 +971,9 @@ def main() -> int:
     p_exec = sub.add_parser("exec")
     p_exec.add_argument("oneliner", help="single-line shell command to type into terminal")
     p_exec.add_argument("--after", type=int, default=4000)
+    p_exec.add_argument("--open-term", action="store_true",
+                        help="right-click desktop and 'Open in Terminal' before typing "
+                             "(use after a fresh remote-session boot when no terminal exists)")
     p_poll = sub.add_parser("poll")
     p_poll.add_argument("marker")
     p_poll.add_argument("--timeout", type=float, default=900.0)
@@ -1000,7 +1017,7 @@ def main() -> int:
     elif args.cmd == "peek":
         remote_peek(cfg)
     elif args.cmd == "exec":
-        remote_exec(cfg, args.oneliner, after_ms=args.after)
+        remote_exec(cfg, args.oneliner, after_ms=args.after, open_term=args.open_term)
     elif args.cmd == "poll":
         hit = poll_until_marker(cfg, args.marker, timeout_s=args.timeout, interval_s=args.interval)
         return 0 if hit else 1
