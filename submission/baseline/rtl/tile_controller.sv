@@ -80,9 +80,10 @@ module tile_controller #(
     state_t state;
     logic [$clog2(NUM_Q_TILES):0]  q_idx;
     logic [$clog2(NUM_KV_TILES):0] kv_idx;
+    localparam integer TILE_IDX_W = $clog2(SEQ_LEN);
 
-    assign q_tile_idx  = $clog2(SEQ_LEN)'(q_idx);
-    assign kv_tile_idx = $clog2(SEQ_LEN)'(kv_idx);
+    assign q_tile_idx  = TILE_IDX_W'(q_idx);
+    assign kv_tile_idx = TILE_IDX_W'(kv_idx);
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

@@ -36,12 +36,13 @@ module reciprocal_unit #(
     logic [WIDTH-1:0] d_norm;
     logic [WIDTH-1:0] d_saved;
     logic [$clog2(WIDTH)-1:0] shift_amt;
+    localparam integer LZ_W = $clog2(WIDTH);
 
     function automatic [$clog2(WIDTH)-1:0] count_leading_zeros(input [WIDTH-1:0] val);
         for (int i = WIDTH-1; i >= 0; i--) begin
-            if (val[i]) return $clog2(WIDTH)'(WIDTH - 1 - i);
+            if (val[i]) return LZ_W'(WIDTH - 1 - i);
         end
-        return $clog2(WIDTH)'(WIDTH);
+        return LZ_W'(WIDTH);
     endfunction
 
     always_ff @(posedge clk or negedge rst_n) begin

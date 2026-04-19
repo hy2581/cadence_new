@@ -114,6 +114,7 @@ module compute_core #(
     // Output accumulator signals
     logic oa_start, oa_done, oa_busy;
     logic oa_v_valid;
+    logic oa_v_request;
     logic [$clog2(NUM_STEPS):0] oa_v_step;
 
     output_accumulator #(
@@ -127,7 +128,8 @@ module compute_core #(
         .p_matrix(p_matrix),
         .v_data(v_data), .v_valid(oa_v_valid),
         .rescale(rescale_vals), .l_values(l_new),
-        .o_out(o_tile), .o_valid(o_valid)
+        .o_out(o_tile), .o_valid(o_valid),
+        .v_request(oa_v_request)
     );
 
     // Persistent softmax state across KV tiles
@@ -230,7 +232,7 @@ module compute_core #(
                 end
 
                 S_ACCUMULATE: begin
-                    if (oa_busy && !oa_done) begin
+                    if (oa_v_request && !oa_done && oa_v_step < NUM_STEPS) begin
                         v_rd_en    <= 1'b1;
                         v_rd_step  <= oa_v_step[$clog2(NUM_STEPS)-1:0];
                         oa_v_valid <= 1'b1;

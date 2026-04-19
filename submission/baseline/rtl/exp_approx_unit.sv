@@ -30,13 +30,17 @@ module exp_approx_unit #(
     logic [9:0] idx_p1;
     logic clamp_low_p1, clamp_high_p1;
 
-    // Combinational index computation (verified in debug)
+    // Division-free index computation using multiply-shift
+    // step_fp = 20 * (1 << FRAC_IN) / LUT_SIZE
+    // idx = x_plus_16 / step_fp ≈ (x_plus_16 >> (FRAC_IN-8)) * 205 >> 10
+    // where 205/1024 ≈ 1/5, works for any FRAC_IN >= 8
+    localparam SHIFT1 = FRAC_IN - 8;
     reg signed [IN_WIDTH-1:0] x_plus_16_c;
     reg signed [IN_WIDTH-1:0] idx_calc_c;
 
     always @(*) begin
-        x_plus_16_c = x_in + (16 * (1 << FRAC_IN));
-        idx_calc_c  = x_plus_16_c / 5;
+        x_plus_16_c = x_in + (IN_WIDTH'(16) <<< FRAC_IN);
+        idx_calc_c  = (x_plus_16_c >>> SHIFT1) * 205 >>> 10;
     end
 
     always_ff @(posedge clk or negedge rst_n) begin
