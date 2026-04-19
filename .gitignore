@@ -4,6 +4,9 @@
 __pycache__/
 *.pyc
 
+# 讲义（本地学习材料，不入仓）
+讲义/
+
 # cadence_runner runtime state
 tools/sky130_synth/
 tools/sky130_synth.tar.gz
