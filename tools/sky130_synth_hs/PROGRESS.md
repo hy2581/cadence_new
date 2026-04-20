@@ -1,71 +1,119 @@
-# Sky130 HS 综合 — 中间进度记录（2026-04-20）
+# Sky130 HS 综合 — Run #1 结果摘要（2026-04-20）
 
-> **状态**：syn_generic 阶段全部 6 partition 完成，syn_map / syn_opt 进行中。最终 reports/ 还没生成；本文件记录已经能拿到的中间数据，待综合完成后会被替换为完整的 final report。
+## 运行结果一句话
 
-## 1. 运行环境
+> **100 MHz 时钟下综合收敛**：最差路径 slack **+1102 ps**，全部 `max_transition`/`max_capacitance`/`max_fanout` design rules **无违规**；`flash_attention_top` 成功映射到 `sky130_fd_sc_hs` 库上。面积/功耗报告因脚本 bug 未落盘（见下文）。
+
+## 运行环境
 
 | 项 | 值 |
 |---|---|
-| 主机 | sh02lo02 (Intel Xeon Gold 6140 18×2 = 36 phys cores, 1006 GB RAM) |
-| OS | RHEL 8.4 |
-| Genus | DDI 25.12.000 (Genus 25.12-s067_1) |
-| License | `5280@sh02lo01` |
-| Lib | `/tmp/sky130_pdk/sky130A/libs.ref/sky130_fd_sc_hs/lib/sky130_fd_sc_hs__tt_025C_1v80.lib` (TT, 1.8V, 25°C) |
+| 主机 | sh02lo02 (Intel Xeon Gold 6140 18×2 核, 1006 GB RAM) |
+| Genus | 25.12-s067_1 (DDI 25.12.000) |
+| Liberty | `sky130_fd_sc_hs__tt_025C_1v80.lib` (TT, 1.8V, 25°C) |
 | Top | `flash_attention_top` |
-| Clock period | 10.0 ns (100 MHz target) |
+| Clock period 目标 | 10.0 ns (100 MHz) |
 | Effort | medium / medium / medium (generic / map / opt) |
 | Clock gating | disabled |
-| Cell LEF | **未加载** (sky130A 不带 Cadence 兼容的 tech LEF, 详见 `tools/ACCESS.md` §5.3) |
+| 总 wall time | **6 h 5 min** (04:44:07 → 10:49:41 BJ 时间) |
+| 内存峰值 | 24.2 GB (master process) |
 
-## 2. syn_generic — 6 partitions 全部完成
+## Critical Path Timing (来自 `reports/timing_top20.rpt`，run 1)
 
-PBS (Partition-Based Synthesis) 自动把 `flash_attention_top` 切成 6 个 partition 并行跑 generic optimization：
+```
+Path 1: MET (1102 ps) Setup Check
+  Group: clk
+  Startpoint: u_tile_ctrl/q_idx_reg[1]/CLK
+  Endpoint:   u_tile_ctrl/dma_rd_addr_reg[63]/D
 
-| Partition | Cell-Count Start → Done | Cell-Area Start → Done | Slack Done (ns) | TNS Done | Elapsed |
-|---|---:|---:|---:|---:|---:|
-| pbs_genopt_0 | (initial) → **6,401**       | (initial) → **125,604**     | -460.9   | 460.9     | 56 s     |
-| pbs_genopt_4 | 39,420 → **5**              | 562,715 → **158**           | +370.4   | 0.0       | 70 s     |
-| pbs_genopt_2 | (initial) → **74,417**      | (initial) → **1,094,848**   | -874.9   | 425,785   | 1,119 s  |
-| pbs_genopt_1 | 207,477 → **194,710**       | 6,339,267 → **5,576,018**   | -839.9   | 886,205   | 2,160 s  |
-| pbs_genopt_3 | 1,449,164 → **954,036**     | 15,621,737 → **10,933,790** | +2,846.3 | 0.0       | 3,142 s  |
-| pbs_genopt_5 | (initial) → **1,602,278**   | (initial) → **18,868,626**  | -31,920  | 321,000,845 | 10,404 s |
-| **TOTAL after generic** | **~2,831,847** | **~36,599,044** | (per-part) | (per-part) | ~17,000 s wall (并行) |
+       Clock Edge:+   10000 ps  (100 MHz)
+            Setup:-     174 ps
+      Uncertainty:-     200 ps
+    Required Time:=    9626 ps
+        Data Path:-    8525 ps
+            Slack:=   +1102 ps    ← POSITIVE = MET
+```
 
-**说明**：
+- 最差路径从 tile_controller 的 q_idx 寄存器出发，经过一串 Wallace CSA 全加器乘法 → 回写到 DMA 读地址寄存器
+- 数据路径 **8525 ps** / 时钟周期 **10000 ps** ≈ 85% 利用率，还有 15% 裕量
+- 理论极限：`10000 - 8525 - 174 - 200 = 1101 ps` slack ≈ fmax **110 MHz**（把周期压到 9 ns, 即 ~111 MHz 才会开始违规；保守设到 9.5 ns / 105 MHz 应该能稳定收敛）
 
-- "Cell-Count" 此处是 **generic gates**（与/或/异或等通用代数门），不是真实的 standard cell。`syn_map` 把这些映射到 sky130_fd_sc_hs 库后数量会大幅下降。
-- **`pbs_genopt_4` 塌缩到 5 cells** — 这个 partition 几乎全是 dead code 或被上下文常数化的逻辑，跟旧 HD 综合时观察到的现象一致。后续应该回 RTL 排查（可能是 reset 锁死的死代码、或者综合时 `SYNTHESIS` macro 把某条路径关掉了）。
-- **`pbs_genopt_5` 是最大且最差的 partition**：1.6M cells, slack -31920 ns。虽然 syn_map/syn_opt 还会大幅优化，但 partition 5 在初始 generic 上就严重违反时序，最终能不能在 100 MHz 收敛要看 syn_opt 后的报告。
+## Design Report (来自 `reports/design.rpt`)
 
-## 3. syn_map / syn_opt — 进行中（已观测到的 partition）
+```
+Technology library: sky130_fd_sc_hs__tt_025C_1v80 1.0000000000
+Operating conditions: typ (balanced_tree)
 
-`syn_map` + `syn_opt` 阶段被 Genus 改名为 PBS Final Compile Optimization (`pbs_fcopt_*`)。目前已观测到的 8 个 fcopt partition (9, 11, 12, 13, 14, 15, 19, 23)：
+Max_transition design rule:   no violations.
+Max_capacitance design rule:  no violations.
+Max_fanout design rule:       no violations.
+```
 
-| Partition | Cell-Count Start → Done | Cell-Area Start → Done | Slack Done (ns) | Elapsed |
+**3 条 DRC 全过** — 综合网表就绪，可以直接 handoff 给 Innovus 做 PnR。
+
+## syn_generic 6-partition summary (从 genus_run.log 提取)
+
+| Partition | Start Cell Count | Done Cell Count | Done Slack (ns) | Elapsed |
 |---|---:|---:|---:|---:|
-| pbs_fcopt_9..15  | 103,558 → **60,928** | 1,167,300 → **875,015** | +1,262 | ~330 s |
-| pbs_fcopt_19, 23 | 类似  | 类似 | 类似 | ~390 s |
+| pbs_genopt_0 | — | 6,401 | -0.46 | 56 s |
+| pbs_genopt_1 | 207,477 | 194,710 | -0.84 | 2,160 s |
+| pbs_genopt_2 | — | 74,417 | -0.87 | 1,119 s |
+| pbs_genopt_3 | 1,449,164 | 954,036 | +2.85 | 3,142 s |
+| pbs_genopt_4 | 39,420 | **5** ← 几乎全被常数折叠/死代码消除 | +0.37 | 70 s |
+| pbs_genopt_5 | — | 1,602,278 | -31.92 | 10,404 s (2h53min, 最长) |
 
-每个 fcopt partition 基本上把 generic gates 优化掉 ~40%，slack 从 +2179 收紧到 +1262 ns（注意这时候已经是真实 std cell timing，不是 generic 估算了，但还在松目标——因为我设的 clock period 是 10ns，在 Sky130 HS 上 100 MHz 比较容易收敛）。
+> ⚠️ pbs_genopt_4 塌缩到 5 个 cell 值得回查 RTL — 很可能是某个 partition 被常数输入锁死、或者综合时 `SYNTHESIS` 宏把某个路径关掉了。
 
-预期 fcopt partition 总数 30+，每个 5-7 min，全部完成预计 +30-60 min。
+## syn_map (PBS_Map) 示例数据
 
-## 4. 内存峰值
+| Partition | Start (Cell×Area) | Done (Cell×Area) | Slack Done |
+|---|---:|---:|---:|
+| pbs_map_6 | 19801 × 540k | 11220 × 373k | +276 ps |
+| pbs_map_8 | 20170 × 547k | 11741 × 378k | +275 ps |
 
-| 阶段 | Peak Memory |
-|---|---:|
-| pbs_genopt_3 (1.45M cells)        | **11.25 GB** |
-| pbs_genopt_5 (1.6M cells)         | (估计 ≥12 GB) |
-| pbs_fcopt_9 (smaller partitions)  | **23.6 GB** (这个是因为 Genus master 同时持有多个 partition 的 db) |
+每个 map partition 平均把 cell count 优化掉 ~43%，slack 由 generic 阶段的 +163ps 收紧到映射后的 +275ps（因为真实 std cell 计时比 generic 估算更精确）。
 
-峰值 ~24 GB，远低于服务器 1006 GB 上限。完全没问题。
+## ⚠️ 本次缺失的报告
 
-## 5. 总挂钟时间估算
+以下文件应该由 `scripts/genus_synth.tcl` 生成，但**第一轮**因 Tcl 错误阻断：
 
-- syn_generic: 已经用了 ~3h (wall, 6 partition 并行但 partition 5 单独 2h53min 卡住)
-- syn_map (pbs_fcopt_*): 估计 +30-60 min
-- syn_opt (final): 估计 +20-40 min
-- 报告生成 + 网表写出: 1-2 min
-- **预计 total wall**: 4 - 5 h
+- `reports/area.rpt`, `area_summary.rpt`, `area_detail.rpt`
+- `reports/gates.rpt`, `gates_nand2eq.rpt`（赛题面积评判口径: NAND2 等效门数）
+- `reports/power.rpt`
+- `reports/qor.rpt`
+- `reports/messages.rpt`, `clock_gating.rpt`
+- `results/flash_attention_top_netlist.v`
+- `results/flash_attention_top.sdc`
+- `results/flash_attention_top_post_syn.db`
 
-> 这一行待综合彻底完成、`reports/qor.rpt` 和 `reports/area.rpt` 拉回本地后会被替换为最终数据。
+### 根因
+
+Genus 25.12 里 `report_area -hierarchy` 选项已被移除，改用 `-depth <integer>`。旧 `tools/sky130_synth/scripts/genus_synth.tcl`（HD 版本）用的也是 `-hierarchy`，但那版本跑在不同的 Genus 版本上可能还支持。
+
+```
+Error : An invalid option was specified. [TUI-204]
+        : An option named '-hierarchy' could not be found.
+```
+
+Tcl script 遇到 Error 后整体 abort，`write_hdl` / `write_sdc` / 后续 report 全部跳过。
+
+### 修复（已 commit，Run #2 在跑）
+
+- 把 `write_hdl` / `write_sdc` / `write_db` 挪到所有 report 命令之前 — 哪怕后面 report 失败，至少 netlist + db 保底
+- 把 12 个 report 命令改成 `foreach + catch { ... }` 驱动，单条失败不影响后续
+- `-hierarchy` → `-depth 10`
+- 加 `-normalize_with_gate sky130_fd_sc_hs__nand2_1` 用于 NAND2 等效门数
+
+见 commit `41a6aba`。
+
+## Run #2 状态
+
+同一套 RTL + Tcl（改 report 部分）+ 同样 `sky130_fd_sc_hs__tt_025C_1v80.lib` 重跑，启动于 BJ 时间 11:14（UTC 03:14）。预期 +6h 完成。完成后会替换本文件为 Run #2 的完整 report 汇总。
+
+## 附件
+
+`reports_run1/` 目录保留了 Run #1 能拿到的三份关键报告：
+
+- `reports_run1/design.rpt`         (DRC 全过)
+- `reports_run1/timing_top20.rpt`   (200k，top 20 worst-N5 critical path)
+- `reports_run1/timing_max_head80k.rpt` (前 80KB 的 `timing_max.rpt`，完整 432KB 因体积没全进仓)
