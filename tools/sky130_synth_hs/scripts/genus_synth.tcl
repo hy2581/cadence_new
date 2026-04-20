@@ -21,9 +21,11 @@ set HS_LIB $PDK/libs.ref/sky130_fd_sc_hs/lib
 set_db init_lib_search_path  $HS_LIB
 set_db library               {sky130_fd_sc_hs__tt_025C_1v80.lib}
 
-# 让 Genus 在做 max_transition / max_capacitance 检查时也有 LEF；可选
-# 这一步不强制，sky130 HS 综合不需要 tech LEF
-set_db lef_library [list $PDK/libs.ref/sky130_fd_sc_hs/lef/sky130_fd_sc_hs.lef]
+# 注：不加载 cell LEF。sky130A 的 cell LEF (sky130_fd_sc_hs.lef) 引用了 li1/met1/
+# pwell/nwell 等层，这些层只在 SkyWater 的 cadence tech LEF 里定义，而 PDK tar 里
+# 没有 tech LEF。强行 set_db lef_library 会导致 PHYS-100/PHYS-10/TUI-48 错误并
+# abort 综合。Genus 不需要 cell LEF 就可以做 syn_generic/syn_map/syn_opt，PnR
+# 阶段（Innovus）才需要。
 
 # --- HDL 搜索路径 ---
 set_db hdl_search_path       "$WORK/rtl $WORK/rtl/include"
@@ -92,25 +94,38 @@ syn_opt
 file mkdir reports
 file mkdir results
 
-report_design                                  > reports/design.rpt
-report_timing  -max_paths 50                   > reports/timing_max.rpt
-report_timing  -max_paths 20 -nworst 5         > reports/timing_top20.rpt
-report_area    -hierarchy                      > reports/area.rpt
-report_area    -summary                        > reports/area_summary.rpt
-report_power                                   > reports/power.rpt
-report_qor                                     > reports/qor.rpt
-report_gates   -power                          > reports/gates.rpt
-report_messages                                > reports/messages.rpt
-report_clock_gating                            > reports/clock_gating.rpt
-
-# 关键: Joules / 评委要的"等效与非门数 (NAND2-equivalent gate count)"
-# Cadence 的"等效逻辑门"按 NAND2 单元面积折算；HS 库 NAND2 名字是 sky130_fd_sc_hs__nand2_1
-# 在报告里搜该单元面积，再用 total_area / nand2_area 即可换算
-report_gates -unit_size {sky130_fd_sc_hs__nand2_1} > reports/gates_nand2eq.rpt
-
-# 另：把综合后的网表 + 时序约束写出来，方便后续 Innovus PnR / 后仿
+# 先把综合后的数据库写下来，哪怕后续报告命令失败，至少 netlist 和 db 拿得到
 write_hdl > results/${DESIGN}_netlist.v
 write_sdc > results/${DESIGN}.sdc
+write_db results/${DESIGN}_post_syn.db
+
+# 接下来是一堆报告；用 Tcl 的 catch {} 包一层，单条失败不影响后续
+foreach {fname cmd} {
+    design.rpt        "report_design"
+    timing_max.rpt    "report_timing -max_paths 50"
+    timing_top20.rpt  "report_timing -max_paths 20 -nworst 5"
+    area.rpt          "report_area -depth 10"
+    area_summary.rpt  "report_area -summary"
+    area_detail.rpt   "report_area -detail"
+    gates.rpt         "report_area -gates"
+    power.rpt         "report_power"
+    qor.rpt           "report_qor"
+    messages.rpt      "report_messages"
+    clock_gating.rpt  "report_clock_gating"
+    gates_nand2eq.rpt "report_area -normalize_with_gate sky130_fd_sc_hs__nand2_1"
+} {
+    set rc [catch {
+        set fh [open "reports/$fname" w]
+        puts $fh [eval $cmd]
+        close $fh
+    } err]
+    if {$rc != 0} {
+        puts "report FAILED: $fname : $err"
+        catch { close $fh }
+    } else {
+        puts "report OK: $fname"
+    }
+}
 
 puts "================================================"
 puts "  Genus synthesis finished: $DESIGN"
