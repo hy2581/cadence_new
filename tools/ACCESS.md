@@ -281,20 +281,44 @@ python3 tools/cadence_runner.py poll sky130_synth_hs_result_ --timeout 25200 --i
 python3 tools/cadence_runner.py download sky130_synth_hs_result_<TS>.tar.gz ./
 ```
 
-### 5.7 Run #1 实际测量（2026-04-20, 6 h 5 min wall time）
+### 5.7 实际测量结果 (Run #3, 2026-04-20, 完整数据)
 
-Clock period **10 ns (100 MHz) 收敛成功**：
+> Run #1 和 Run #2 都因 Tcl bug 没拿全报告，**Run #3 的数据才是本 PR 的最终结果**。踩过的三个 bug 详见 `tools/sky130_synth_hs/PROGRESS.md`。
 
-| 指标 | 值 |
-|---|---|
-| Technology | `sky130_fd_sc_hs__tt_025C_1v80` (TT, 1.8V, 25°C) |
-| Worst Setup Slack | **+1102 ps** ✅ MET |
-| Worst Path | `u_tile_ctrl/q_idx_reg[1] → u_tile_ctrl/dma_rd_addr_reg[63]` (tile_controller 里 Wallace CSA 乘法) |
-| Data Path Delay | 8525 ps (占周期的 85%) |
-| DRC (max_trans / max_cap / max_fanout) | 全过，无违规 |
-| 预估 fmax | ~110 MHz (slack 余量允许 9.1 ns 周期) |
-| Wall time | 6 h 5 min (syn_generic 3h + syn_map 1.5h + syn_opt 1h + 报告) |
-| Memory peak | 24 GB (master process) |
+**Clock period 10 ns (100 MHz) 收敛成功**，`flash_attention_top` 所有关键指标：
+
+| 指标 | 值 | vs 赛题要求 |
+|---|---:|---|
+| Technology | `sky130_fd_sc_hs__tt_025C_1v80` | ✅ 官方钦点 |
+| **Worst Setup Slack** | **+1101.6 ps ✅ MET** | TNS=0, 违规路径 0 |
+| Data Path Delay | 8525 ps (85% of 10000 ps) | 1102 ps 余量 |
+| **Total Cell Count** | **3,555** (Sequential 1242 / Combinational 2313 / Hier 10) | |
+| **Total Cell Area** | **75,987.935 μm²** | |
+| **NAND2-equivalent gates** | **15,847** | 赛题预算 ≤ **2,000,000**，占 **0.79%** ✅ 大幅富余 |
+| **Total Power** (vectorless) | **11.12 mW** (leak 0.01% / internal 87.8% / switching 12.2%) | 注：Baseline 只给估算，精确值需 VCD-driven |
+| **DRC** | max_trans ✅ / max_cap ✅ / max_fanout ✅ | 3/3 通过 |
+| 预估 fmax | ~105-110 MHz | slack 1102ps 允许压到 8.9ns，留 5-10% 保守裕量 |
+| Wall time | 6 h 7 min | syn_generic 3h + syn_map 1.5h + syn_opt 1h + reports 10min |
+| Memory peak | 23.6 GB | 服务器 1006 GB 绰绰有余 |
+
+Worst setup path：
+```
+Startpoint:  u_tile_ctrl/q_idx_reg[1]/CLK
+Endpoint:    u_tile_ctrl/dma_rd_addr_reg[63]/D
+```
+经过 tile_controller 里的 Wallace CSA 全加器乘法链（`q_idx * stride` 类似的 DMA 地址计算）。
+
+**子模块面积分布**（占全 top 的百分比）：
+
+| 模块 | Cell | NAND2-eq gates | 占比 |
+|---|---:|---:|---:|
+| u_tile_ctrl (tile_controller)  | 1599 | 4601 | 29.0% |
+| u_dma (dma_engine + axi4_master) | 709 | 4984 | 31.5% |
+| u_axil (axi4_lite_slave)       | 845 | 4962 | 31.3% |
+| u_compute (compute_core)        | 272 | 854  | 5.4% |
+| hierarchy overhead              | 130 | ~445 | ~2.8% |
+
+观察：**90% 面积在控制/接口**（tile_ctrl + dma + axil），真正做 SDPA 计算的 `u_compute` 只有 5.4%。这跟 FlashAttention-style "低中间存储" 设计特性吻合——控制流复杂度高，算术单元相对小。
 
 syn_generic 6 partition 摘要：
 
@@ -307,7 +331,13 @@ syn_generic 6 partition 摘要：
 | pbs_genopt_4 | **5** ← 塌缩 | +0.37 | 70 s |
 | pbs_genopt_5 | 1,602,278 | -31.92 | 10,404 s (2h53min 单 partition) |
 
-> ⚠️ `pbs_genopt_4` 塌缩到 5 cell（起始 39,420）：要么是 partition 里的逻辑被常数折叠光了，要么是 `SYNTHESIS` 宏关掉了路径。值得回 RTL 查。
+> ⚠️ `pbs_genopt_4` 从 39,420 塌缩到 5 cell：partition 里的逻辑被常数折叠光了，或 `SYNTHESIS` 宏关掉了某路径。值得回 RTL 查。
+
+**综合后产物**（已保留在 `tools/sky130_synth_hs/reports_run3/`）：
+
+- 11 份报告 (design/timing_max/timing_top20/area/area_summary/area_detail/gates_nand2eq/qor/power/messages/clock_gating)
+- `flash_attention_top_netlist.v` (1.9 MB, 35270 行 gate-level netlist)
+- `flash_attention_top.sdc` (67.7 KB, 综合工具写出的 SDC，供 Innovus PnR 用)
 
 ### 5.8 踩过的坑（综合阶段，务必写进脚本）
 
@@ -323,6 +353,24 @@ Error : An invalid option was specified. [TUI-204] [parse_options]
 旧版本的 Tcl script（包括 `tools/sky130_synth/scripts/genus_synth.tcl`）用 `-hierarchy`，在 25.12 上直接 abort，后续 `write_hdl` / `write_sdc` 全部跳过，**6 小时综合白跑**。改成 `-depth <N>` 即可。
 
 **⚠️ Genus Tcl 脚本里任何一条 `report_*` 失败都会整条 abort**，所以全部 report 应该用 `foreach + catch {}` 包裹；并且 **`write_hdl` / `write_sdc` / `write_db` 必须放在所有 report 之前**（保底，哪怕报告全挂至少还有 netlist）。模板见 `tools/sky130_synth_hs/scripts/genus_synth.tcl` 末尾的 `foreach {fname cmd}` 块。
+
+**⚠️ Genus `report_*` 命令把报告打到 stdout，Tcl 返回值是空字符串。** 所以下面这段看着对的 Tcl 实际是**写空文件**：
+
+```tcl
+# 错的: reports/area.rpt 只有 1 字节 (换行)
+set fh [open "reports/area.rpt" w]
+puts $fh [report_area -depth 10]
+close $fh
+```
+
+正确用 Genus Tcl 的 `>` redirect 语法（不是标准 Tcl，是 Genus 扩展）：
+
+```tcl
+# 对: 报告文本正常写入
+eval "report_area -depth 10 > reports/area.rpt"
+```
+
+踩过这个坑一次：Run #3 的 reports/*.rpt 全部是 1 字节空文件，真实报告文本全打到了 `/tmp/sky130_synth_hs/genus.log` 里（因为 stdout 被 bash 的 `genus ... > genus_run.log` 捕获）。最后是从 log 里按 `report OK:` 分隔符切回来的。
 
 **⚠️ 不要 `set_db lef_library <sky130 cell LEF>`。** SkyWater 的 `sky130_fd_sc_hs.lef` 引用了 `li1` / `met1` / `pwell` / `nwell` 等层，这些层只在 **Cadence tech LEF** 里定义，而 `/home/share/sky130A.tar.gz` 里**没有** Cadence 兼容的 tech LEF（有 `libs.tech/openroad/` / `librelane/` / `magic/` 但都不是 Innovus 口径）。强行 `lef_library` 会：
 
@@ -367,6 +415,24 @@ python3 tools/cadence_runner.py exec 'md5sum "$HOME/neere/Start Mate Desktop/sky
 **⚠️ `pbs_genopt_4 → 5 cells` 塌缩是 tile_controller 里某个 partition 被常数折叠，不是 bug**（Run #1/Run #2 都出现）。不影响整体功能，但提示 RTL 有可清理的死代码。
 
 **⚠️ session 断开后 `remote_exec` 第一次调用会 `iframe never appeared`**。先 `python3 tools/cadence_runner.py probe`（触发 Start remote）再 sleep 30s 再 `exec --open-term` 就稳。
+
+**⚠️ Cadence Cloud VNC proxy 会抽风（实测过两次）**：长时间综合跑着期间，VNC 侧可能返回：
+
+- `Internal server error / ERROR 500`（VNC proxy 后端挂了）
+- `Loading external app...` 卡死超过 30 分钟（App Presenter 启不起来）
+
+VNC 不可用时：
+
+- `list` / `upload` / `download` **不受影响**（走 REST API，不经过 VNC）
+- `exec` / `peek` **全部不可用**（`noVNC iframe never appeared`）
+- 远端服务器上正在跑的 Genus / xrun 等批处理任务**不受影响**（它们不依赖 VNC，VNC 只是键鼠通道）
+
+应对：
+1. 只靠 FILES tab 交付（`run.sh` 里把日志/结果 `cp "$HOME/neere/Start Mate Desktop/"`，本地靠 `poll` + `download` 拉回）
+2. 不要在 VNC 出问题时 kill session；批处理会继续
+3. 等 VNC proxy 自己恢复（实测半小时到几小时不等）
+
+这条坑的具体意义：**cadence_runner.py 的 `run-synth` 全自动流程必须做成"启动后 VNC 就不再需要"**——把所有结果走 FILES tab 回收，而不是每隔几分钟截图 peek。
 
 ### 5.9 没跑通 / 待解决
 
@@ -453,24 +519,20 @@ NFS 服务器 `shstna02` export 了大量工艺库 volume：
 - [x] **官方 PDK 找到**：`/home/share/sky130A.tar.gz` (1.51GB, sky130_fd_sc_hs)、`/home/share/sky130_sram_*.zip` (OpenRAM macro)、`/home/share/RAK.tar` (Cadence 教程)、`readMe.txt` 由助教 `shanshan@cadence.com` 维护，钦点用 `sky130_fd_sc_hs`（详见 §5）
 - [x] 网络情况摸清：DNS 不通，TCP/443 直连可达；但 **PDK 既然在远端 NFS，本地下载 + 上传不再必要**
 - [x] **`tools/sky130_synth_hs/` 落地**：HS 版 Genus 综合环境（README + pack_and_upload.sh + genus_synth.tcl + run.sh + PROGRESS.md），详见 §5.6
-- [x] **Run #1 综合 6h5min 完成，100 MHz 收敛 slack +1102ps**（详见 §5.7）；reports_run1/ 保留 design.rpt / timing_top20.rpt / timing_max.rpt 前 80KB
-- [x] 发现并记录 Genus 25.12 的三个坑（`-hierarchy` 移除、Tcl abort 级联、cell LEF 不可加载）：§5.8
+- [x] **综合跑通（Run #3 full reports）**：100 MHz MET slack +1102 ps，cell count 3555, total area 76k μm², NAND2-equivalent **15,847 门 (赛题预算的 0.79%)**, 功耗 11.12 mW。数据在 §5.7，完整报告在 `tools/sky130_synth_hs/reports_run3/`
+- [x] 发现并记录 Genus 25.12 的多个坑（`-hierarchy` 移除、Tcl abort 级联、cell LEF 不可加载、`report_*` 返回空字符串需走 `>` redirect、FILES upload 不覆盖同名、VNC proxy 会抽风）：§5.8
 - [x] **修复 noVNC 长字符串打字 keyup 丢失 bug**（`Desktop.type` 改成显式 down/up，60ms/char + 每 16 char sleep 120ms）
 - [x] **修复 `remote_exec` 在终端不存在时无声失败**（新增 `--open-term` 选项，attach 后右键空桌面 "Open in Terminal" 再发命令）
-- [x] 发现 FILES tab upload **不覆盖同名文件**，脚本迭代必须先 `rm` 再 upload (§5.8)
-
-**进行中：**
-
-- [ ] **Run #2 重跑**：修好 `report_area -depth 10` + catch {} 包装后的全 report + write_hdl/sdc/db 保底。启动于 2026-04-20 03:14 UTC, PID 1957792，预计 6h 完成。目标：拿到完整 area / gates_nand2eq / qor / power 报告 + 综合网表
+- [x] **加固 `pack_and_upload.sh`**：上传前强制清理远端所有同名 tar 变体 + md5 校验
 
 **待办：**
 
-- [ ] Run #2 完成后 `tools/sky130_synth_hs/reports/` 落地，更新 PROGRESS.md 为最终数据
 - [ ] 回 RTL 查 `pbs_genopt_4` 塌缩根因（39,420 → 5 cells，tile_controller 某 partition 被常数折叠）
 - [ ] 评估 Innovus PnR：`/home/share/sky130A.tar.gz` 没带 Cadence tech LEF；需要向助教要或自己合一份
-- [ ] `fmax` 极限试探：按 Run #1 slack 1102ps，把周期压到 9.0 ns 跑一次
+- [ ] `fmax` 极限试探：按 Run #3 slack 1102ps，把周期压到 9.0 ns 跑一次（应该还能 MET），再试 8.5 ns 找真实极限
 - [ ] Bonus 版本（submission/bonus/rtl）跑一轮综合，对比 baseline vs bonus 的 area/fmax
 - [ ] `cadence_runner.py` 加一个 `run-synth` 子命令封装整个 upload → exec → poll → download 流程
+- [ ] VCD-driven power：xrun 跑出 VCD/SAIF → Joules 读入出精确功耗（现在是 vectorless 估算）
 - [ ] 清理旧 `tools/sky130_synth/` 目录（或保留作 HD 对比基线？需要用户决定）
 
 ## 10. 仓库结构（GitHub）

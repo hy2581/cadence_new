@@ -100,6 +100,16 @@ write_sdc > results/${DESIGN}.sdc
 write_db results/${DESIGN}_post_syn.db
 
 # 接下来是一堆报告；用 Tcl 的 catch {} 包一层，单条失败不影响后续
+#
+# 实现细节坑 (Run #3 踩过): Cadence Tcl 的 `report_*` 命令把报告文本
+# 打到 stdout，返回值是空字符串。所以 `puts $fh [eval $cmd]` 写出来的
+# 是空文件，所有真正的内容会落到 genus 主 log 里去。正确做法是用
+# report_* 的 `-filename` / `>` redirection 语义 (redirect 是 Genus Tcl
+# 扩展，不是标准 Tcl)，或者把命令整个 eval 时 redirect stdout：
+#
+#   set rc [catch { eval "$cmd > reports/$fname" } err]
+#
+# 这里用后一种 (更少改动，保留 report OK/FAILED 标记)。
 foreach {fname cmd} {
     design.rpt        "report_design"
     timing_max.rpt    "report_timing -max_paths 50"
@@ -115,13 +125,10 @@ foreach {fname cmd} {
     gates_nand2eq.rpt "report_area -normalize_with_gate sky130_fd_sc_hs__nand2_1"
 } {
     set rc [catch {
-        set fh [open "reports/$fname" w]
-        puts $fh [eval $cmd]
-        close $fh
+        eval "$cmd > reports/$fname"
     } err]
     if {$rc != 0} {
         puts "report FAILED: $fname : $err"
-        catch { close $fh }
     } else {
         puts "report OK: $fname"
     }
