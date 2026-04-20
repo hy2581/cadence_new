@@ -106,9 +106,40 @@ Tcl script 遇到 Error 后整体 abort，`write_hdl` / `write_sdc` / 后续 rep
 
 见 commit `41a6aba`。
 
-## Run #2 状态
+## Run #2 状态：**重复了 Run #1 的 bug**（FILES tab upload 同名不覆盖）
 
-同一套 RTL + Tcl（改 report 部分）+ 同样 `sky130_fd_sc_hs__tt_025C_1v80.lib` 重跑，启动于 BJ 时间 11:14（UTC 03:14）。预期 +6h 完成。完成后会替换本文件为 Run #2 的完整 report 汇总。
+Run #2 启动于 BJ 时间 11:14（UTC 03:14）、运行了 6 小时 4 分钟，但**产出和 Run #1 完全一样**——只有 3 份 timing/design 报告，没有 area/power/qor/gates_nand2eq/网表，`reports` tar 89.93 KB。
+
+### 根因
+
+FILES tab 行为：upload 不会覆盖同名文件。
+
+1. Run #2 前我做了 `cadence_runner.py rm sky130_synth_hs.tar.gz` + `bash pack_and_upload.sh`
+2. `rm` 返回 `not found`（FILES 列表里显示的名字和 NFS 文件名之间有缓存）
+3. `pack_and_upload` upload 以后，FILES tab 多了一条 `sky130_synth_hs.tar(2).gz`，**但** NFS 上 `sky130_synth_hs.tar.gz`（旧，Run #1 用过）还在
+4. `run.sh` 里 `tar xzf "$HOME/neere/Start Mate Desktop/sky130_synth_hs.tar.gz"` 解出来的是**旧 tar**，里面是带 `report_area -hierarchy` 的 Tcl
+5. Run #2 最后在 `report_area -hierarchy` 再次 abort，只保下来 3 份 timing/design 报告
+
+诊断发现方法：登录远端 `ls -la "$HOME/neere/Start Mate Desktop/" | grep sky130_synth_hs`，看 FILES 区里到底有几个 `.tar.gz` / `.tar(N).gz`。
+
+### 已修
+
+1. `pack_and_upload.sh` 改成上传前先远端 `rm sky130_synth_hs.tar.gz "sky130_synth_hs.tar(1).gz" "sky130_synth_hs.tar(2).gz" "sky130_synth_hs.tar(3).gz"`，再 upload，再 md5 校验。
+2. ACCESS.md §5.8 记录这个坑。
+3. 手工把 FILES 上的 `sky130_synth_hs.tar(2).gz` 重命名成 `sky130_synth_hs.tar.gz`（确保这次远端脚本能拿到正确 tar）。
+
+## Run #3 状态：进行中
+
+启动于 BJ 时间 17:41（UTC 09:41），PID 2130272。这次确认 Tcl 是带 `foreach + catch {}` + `-depth 10` 的正确版本（grep 到 line 100 `write_db`, line 103 `foreach {fname cmd} {`, line 117 `set rc [catch {`）。
+
+**Run #3 运行期间的观测**：
+- 1h03min: genopt done 3/6 ✅
+- 2h06min: genopt done 5/6 ✅
+- 3h+ 后 VNC proxy 返回 `Internal server error / ERROR 500`，noVNC iframe 无法加载，无法继续 probe
+- FILES tab API 仍然工作（不需要 VNC）
+- 预期 BJ 23:45 前后生成 `sky130_synth_hs_result_20260420_1741xx.tar.gz`
+
+Run #3 完成后会替换本文件为完整的 area / gates / power / qor 汇总。
 
 ## 附件
 
