@@ -334,14 +334,31 @@ Error : Cannot change the value of the attribute [TUI-48]
 
 Genus 综合本来就不需要 cell LEF（只需要 .lib），所以**直接不加载**就行。PnR 阶段（Innovus）才会绕不开 tech LEF 这件事，下一步需要联系助教要或自己拼一份。
 
-**⚠️ FILES tab 上传同名文件会保留旧的。** `cadence_runner.py upload foo.tar.gz` 上传如果 FILES tab 已有同名文件，它**不会替换**，你的新内容不会被用。每次改 Tcl 后必须：
+**⚠️ FILES tab 上传同名文件的行为非常坑，踩过两次。** 实测规律：
+
+1. 远端 NFS 已有 `foo.tar.gz`，这个文件实际落在 `$HOME/neere/Start Mate Desktop/foo.tar.gz`
+2. `cadence_runner.py rm foo.tar.gz` 可能返回 "not found"（因为 FILES 列表里的名字和 NFS 里的名字有微妙差异，或者被其它 session 锁住）
+3. 接着 `cadence_runner.py upload foo.tar.gz` **不会替换原文件**，而是在 FILES tab 里多出一条叫 `foo.tar(1).gz` / `foo.tar(2).gz` 的条目
+4. 远端磁盘 NFS 实际看到会有 **3 个文件共存**：`foo.tar.gz`（旧）、`foo.tar(1).gz`、`foo.tar(2).gz`（最新）
+5. 脚本里 `tar xzf "$HOME/neere/Start Mate Desktop/foo.tar.gz"` 展开的还是**最旧的那个**
+
+建议流程（改 Tcl 后 safe 重跑）：
 
 ```bash
-python3 tools/cadence_runner.py rm sky130_synth_hs.tar.gz
+# 本地 pack
 bash tools/sky130_synth_hs/pack_and_upload.sh
+# 远端：强制清理+检验
+python3 tools/cadence_runner.py exec 'cd "$HOME/neere/Start Mate Desktop" && rm -f sky130_synth_hs.tar.gz "sky130_synth_hs.tar(1).gz" "sky130_synth_hs.tar(2).gz"; ls -la sky130_synth_hs*.tar.gz 2>&1' --after 5000
+# 这时 FILES 上应该什么都没有；再 upload
+bash tools/sky130_synth_hs/pack_and_upload.sh
+# 验证 md5 匹配本地
+md5sum /tmp/sky130_synth_hs.tar.gz
+python3 tools/cadence_runner.py exec 'md5sum "$HOME/neere/Start Mate Desktop/sky130_synth_hs.tar.gz"' --after 5000
 ```
 
-否则远端解出来还是旧 tcl，调 bug 能把人调疯。
+如果 md5 不一致，说明 FILES 还在缓存旧版本，改用带时间戳的文件名（例如 `sky130_synth_hs_$(date +%H%M%S).tar.gz`）绕过。
+
+**代价**：Run #2 就是因为这个坑，6 小时的综合重跑**完全浪费**——启动时用的是 Run #1 的旧 tcl，所以同样在 `report_area -hierarchy` abort。发现方法：登录远端 `ls -la "$HOME/neere/Start Mate Desktop/" | grep sky130_synth_hs` 看文件名是不是真的是 `.tar.gz`（正常），还是 `.tar(N).gz`（中招）。
 
 **⚠️ Genus 的 log 是大缓冲写盘，不是行缓冲。** `/tmp/sky130_synth_hs/genus.log` 可能 1 小时都不刷新，但进程 `ps -p $PID -o state` 显示 S(sleeping) + `wchan=core_sys_select` → 表示正在 socket 上等 PBS worker 响应，**不是死掉**。不要 `pkill` 它。真死了会 Z(zombie)。
 
