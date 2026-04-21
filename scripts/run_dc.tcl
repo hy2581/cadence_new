@@ -1,59 +1,114 @@
 # ============================================================
 # Design Compiler Synthesis Script for FlashAttention Accelerator
-# Usage: dc_shell -f scripts/run_dc.tcl
+# Library: NangateOpenCellLibrary (FreePDK45, 45nm)
+# Usage: dc_shell -f scripts/run_dc.tcl | tee dc_synth.log
 # ============================================================
 
-# --- Library setup (customize for your PDK) ---
-# set target_library "your_target_lib.db"
-# set link_library   "* $target_library"
-# For demo, use GTECH (generic technology)
-set synthetic_library "dw_foundation.sldb"
+# --- Set working directory ---
+set WS "/workspace"
 
-# --- Read RTL ---
-set search_path [list ./rtl ./rtl/include]
-define_design_lib work -path ./work_dc
+# --- Library setup ---
+set PDK_LIB "${WS}/lib/NangateOpenCellLibrary.db"
+set DW_LIB "/usr/synopsys/dc-L-2016.03-SP1/libraries/syn/dw_foundation.sldb"
 
-analyze -format sverilog -define SYNTHESIS {
-    rtl/include/fa_params.svh
-    rtl/exp_approx_unit.sv
-    rtl/reciprocal_unit.sv
-    rtl/causal_mask_unit.sv
-    rtl/dot_product_array.sv
-    rtl/online_softmax_unit.sv
-    rtl/output_accumulator.sv
-    rtl/compute_core.sv
-    rtl/buffer_system.sv
-    rtl/tile_controller.sv
-    rtl/axi4_lite_slave.sv
-    rtl/axi4_master_if.sv
-    rtl/dma_engine.sv
-    rtl/flash_attention_top.sv
-}
+set_app_var target_library $PDK_LIB
+set_app_var link_library   "* $PDK_LIB"
+set_app_var synthetic_library $DW_LIB
+set_app_var search_path    [list ${WS}/rtl ${WS}/rtl/include /usr/synopsys/dc-L-2016.03-SP1/libraries/syn]
+
+# --- Work library ---
+file mkdir ${WS}/work_dc
+define_design_lib work -path ${WS}/work_dc
+
+# --- Read RTL (with SYNTHESIS define) ---
+puts "=============================================="
+puts " Reading RTL..."
+puts "=============================================="
+
+analyze -format sverilog -define SYNTHESIS [list \
+    ${WS}/rtl/exp_lut_rom.sv \
+    ${WS}/rtl/exp_approx_unit.sv \
+    ${WS}/rtl/reciprocal_unit.sv \
+    ${WS}/rtl/causal_mask_unit.sv \
+    ${WS}/rtl/dot_product_array.sv \
+    ${WS}/rtl/online_softmax_unit.sv \
+    ${WS}/rtl/output_accumulator.sv \
+    ${WS}/rtl/compute_core.sv \
+    ${WS}/rtl/buffer_system.sv \
+    ${WS}/rtl/tile_controller.sv \
+    ${WS}/rtl/axi4_lite_slave.sv \
+    ${WS}/rtl/axi4_master_if.sv \
+    ${WS}/rtl/dma_engine.sv \
+    ${WS}/rtl/flash_attention_top.sv \
+]
+
+puts "=============================================="
+puts " Elaborating flash_attention_top..."
+puts "=============================================="
 
 elaborate flash_attention_top
 current_design flash_attention_top
+link
+
+# --- Check design ---
+puts "=============================================="
+puts " Checking design..."
+puts "=============================================="
+file mkdir ${WS}/reports
+redirect -file ${WS}/reports/dc_check_design.rpt { check_design }
 
 # --- Constraints ---
-source constraints/flash_attention.sdc
+puts "=============================================="
+puts " Applying constraints..."
+puts "=============================================="
+source ${WS}/constraints/flash_attention.sdc
+
+# --- Set input transition and output load ---
+set_input_transition 0.1 [remove_from_collection [all_inputs] [get_ports clk]]
+set_load 0.01 [all_outputs]
 
 # --- Compile ---
-puts "Starting compile_ultra..."
-compile_ultra -no_autoungroup
+puts "=============================================="
+puts " Compiling (compile -map_effort medium)..."
+puts "=============================================="
+compile -map_effort low -area_effort low
 
 # --- Reports ---
-file mkdir reports/dc_synthesis
+puts "=============================================="
+puts " Generating reports..."
+puts "=============================================="
 
-report_area -hierarchy > reports/dc_synthesis/area.rpt
-report_timing -max_paths 20 > reports/dc_synthesis/timing.rpt
-report_power > reports/dc_synthesis/power.rpt
-report_qor > reports/dc_synthesis/qor.rpt
-report_reference -hierarchy > reports/dc_synthesis/reference.rpt
+redirect -file ${WS}/reports/dc_area.rpt          { report_area -hierarchy }
+redirect -file ${WS}/reports/dc_area_nosplit.rpt   { report_area -hierarchy -nosplit }
+redirect -file ${WS}/reports/dc_timing_max.rpt     { report_timing -path full -delay max -max_paths 20 -nosplit }
+redirect -file ${WS}/reports/dc_timing_min.rpt     { report_timing -path full -delay min -max_paths 10 -nosplit }
+redirect -file ${WS}/reports/dc_power.rpt          { report_power -nosplit }
+redirect -file ${WS}/reports/dc_qor.rpt            { report_qor }
+redirect -file ${WS}/reports/dc_reference.rpt      { report_reference -hierarchy -nosplit }
+redirect -file ${WS}/reports/dc_resources.rpt      { report_resources -hierarchy -nosplit }
 
 # --- Write outputs ---
-file mkdir netlist
-write -format verilog -hierarchy -output netlist/fa_top_netlist.v
-write_sdc -nosplit netlist/fa_top.sdc
-write_sdf netlist/fa_top.sdf
+file mkdir ${WS}/netlist
+write -format verilog -hierarchy -output ${WS}/netlist/fa_top_netlist.v
+write_sdc -nosplit ${WS}/netlist/fa_top.sdc
 
-puts "Synthesis complete. Check reports/dc_synthesis/"
+# --- Summary ---
+puts ""
+puts "=============================================="
+puts " DC Synthesis Complete"
+puts "=============================================="
+puts " Target Library: NangateOpenCellLibrary (45nm)"
+puts " Reports: reports/dc_*.rpt"
+puts " Netlist: netlist/fa_top_netlist.v"
+puts "=============================================="
+
+# Print key results inline
+puts ""
+puts "=== AREA SUMMARY ==="
+report_area
+puts ""
+puts "=== TIMING SUMMARY ==="
+report_timing -max_paths 1
+puts ""
+
 exit
