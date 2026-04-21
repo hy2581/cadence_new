@@ -14,8 +14,12 @@
 | 能力 | 状态 |
 |---|---|
 | 浏览器登录、进入房间、开 Mate Desktop | ✅ |
-| FILES tab 上传 / 下载 / 删除文件 | ✅ |
-| 驱动 noVNC 做键鼠 → 远端 Mate Terminal | ✅ |
+| FILES tab 上传 / 下载 / 删除文件 | ✅ (上传**不覆盖同名**，必须先 `rm` 再 upload，见 §5.8) |
+| 驱动 noVNC 做键鼠 → 远端 Mate Terminal | ✅ (fresh session 要 `exec --open-term`) |
+| 跑 `xrun` 仿真（Xcelium 24.09） | ✅ |
+| 跑 Genus 综合（DDI 25.12，sky130_fd_sc_hs，100 MHz MET） | ✅ Run #1 已完成，见 §5.7 |
+| 跑 Innovus PnR | ⚠️ 缺 Cadence tech LEF，待解决（§5.9） |
+| 跑 Joules RTL power | ⚠️ 脚本模板未写 |
 | ssh / scp / rsync 直接进 `sh02lo02` | ❌（只有浏览器通道） |
 | 远端访问公网 | ⚠️ **DNS 不通**（`/etc/resolv.conf` 空），但 **TCP/443 直连公网 IP 可达**。可用 `curl --resolve` 强行下载 |
 
@@ -74,6 +78,7 @@ python3 tools/cadence_runner.py exec "<bash_oneliner>"     # 在 Mate Terminal �
 | `/apps/XCELIUM2409/24.09.006/` | Cadence Xcelium 仿真器，含 xrun | ro |
 | `/cc`, `/grid/common`, `/proj`, `/projects` | 其它 autofs 自动挂载点（`/grid/common` 下是系统共享库 `.so`；`/cc` 和 `/proj` 当前是空的） | ro |
 | `/home/cm_admin/licenses/` | 许可证文件（`CDS_LIC_FILE=5280@sh02lo01`） | ro |
+| `/home/share/` | **官方提供的 Sky130A PDK + SRAM IP + Cadence RAK 教程**（NFS 共享，所有 ccusers 可读，由 `shanshan@cadence.com` 维护，详见 §5） | ro |
 
 ---
 
@@ -121,34 +126,326 @@ PATH=/apps/XCELIUM2409/24.09.006/tools/systemc/gcc/bin/64bit:
 
 ---
 
-## 5. PDK / 标准单元库（**平台没装**，需自带）
+## 5. PDK / 标准单元库（**官方已提供 Sky130A**，在 `/home/share/`）
 
-### 5.1 结论
+### 5.1 结论（已修正）
 
-平台 **没有安装任何 PDK / 标准单元库**。已经用官方流程做了决定性验证：
+赛题白纸黑字写"服务器已预装赛事所需的 Cadence EDA 工具及对应工艺库"，确实如此。
+**官方 PDK 不通过 module 系统挂载，而是直接 tar 包放在 NFS 共享目录 `/home/share/`**：
 
-1. `module avail pdk` 空
-2. 官方 `pdkFinder.csh`（`/apps/cc/utils/pdkFinder.csh`）跑出来的 `pdkList.csv` **只有表头**
-3. `module avail` 总共只显示：`ddi/251/25.12.000  jasper/2509/25.09.002  license  xcelium/2409/24.09.006`
+```
+/home/share/
+├── sky130A.tar.gz                                    1.51 GB  完整 Sky130A 开源 PDK
+├── sky130_sram_0kbytes_1rw1r_32x64_2.zip             810 KB   OpenRAM 32×64 SRAM IP
+├── RAK.tar                                            10 MB   Cadence Rapid Adoption Kit (Genus / Innovus / Jasper SuperLint PDF 教程)
+└── readMe.txt                                        163 B    "please use the sky130_fb_sc_hs library" (fb 是 typo，实际是 sky130_fd_sc_hs)
+```
 
-### 5.2 扫描覆盖范围
+`/home/share/` 属于 `shanshan` (UID 900006，`shanshan@cadence.com`，赛事助教)，permissions 是 `drwxr-sr-x ccusers`，**所有 ccusers 用户都可读**。
 
-以下都翻过、都没有标准单元 / LEF / Liberty：
+readMe.txt 原文：
 
-| 路径 | 是什么 |
-|---|---|
-| `/apps/*` | 只有 `DDI251`、`XCELIUM2409`、`cc`，无 PDK |
-| `/apps/cc/*` | 管理脚本 & 桌面元素 |
-| `/cc`, `/proj`, `/projects` | autofs indirect map，key 不存在 |
-| `/grid/common` | 系统共享库 `.so`（graphviz、motif、gcc runtime 等），不是 EDA 库 |
-| `/home/cm_admin/*` | license、modulefiles、web 后台 |
-| `/opt` | 系统工具，无关 |
-| `$HOME/Documents`, `$HOME/Public`, `$HOME/Downloads` | 空 |
-| `/apps/DDI251/25.12.000/share/synth/lib/` | 只有 Tcl/Tk/verilog 代码（Genus 自带脚本库），**不是**标准单元 |
+```
+please use the sky130_fb_sc_hs library for your design.
+if you encounter any missing files or related issues, please contact me immediately: shanshan@cadence.com
+```
 
-### 5.3 有意思的旁证
+> 注意：readMe 里的 `sky130_fb_sc_hs` 是 **typo**，正确的库名是 `sky130_fd_sc_hs`（HS = High Speed），后文 §5.4 会列证据。
 
-NFS 服务器 `shstna02` 确实 export 了大量工艺库 volume（`showmount -e shstna02 | grep -iE 'tsmc|gf|umc|smic|pdk'`）：
+### 5.2 上一版结论错在哪
+
+旧版 ACCESS.md 这一节断言"平台没装 PDK，需自带"，理由是：
+
+1. `module avail` 只有 ddi/jasper/license/xcelium —— **正确，但 module 不是唯一交付通道**
+2. `pdkFinder.csh` 跑出 `pdkList.csv` 只有表头 —— **正确，因为 pdkFinder 只看 `/cc` 下的 autoproj key，NFS 共享目录它不知道**
+3. `find / -name '*.lib' -size +100k` 没扫到 —— **当时 find 没下到 `/home/share/`**：原来的 recon 脚本只扫了 `~/shared`、`~/Shared`、`/shared` 等候选位置，恰好漏了 `/home/share`（注意是 **NFS auto.home 自动挂载**，stat 一下就出来）
+
+正确的扫法：
+
+```bash
+# 1. 直接看 /home 顶层（每个用户一个目录 + 一个特殊的 share/）
+ls -la /home/
+
+# 2. 在共享目录里抓 .lib / .lef / pdk
+find /home -maxdepth 4 -name '*.lib' -size +100k -not -path '*/.snapshot/*'
+
+# 3. 直接列 /home/share
+ls -la /home/share
+```
+
+教训：以后做侦察时，**`/home` 顶层一定要 `ls`**，因为 NFS 共享目录习惯叫 `share/`、`public/`、`pub/` 这种"看着像用户名"的目录，单纯 grep 用户名是看不出来的。
+
+### 5.3 PDK 内部结构（`/home/share/sky130A.tar.gz`，13430 个文件）
+
+解开后是标准的 [google/skywater-pdk](https://github.com/google/skywater-pdk) `sky130A/` 树：
+
+```
+sky130A/
+├── .config/nodeinfo.json
+├── libs.ref/                       # 各家 IP 的物理视图
+│   ├── sky130_fd_sc_hs/            # ★ readMe 指定使用的高速标准单元库
+│   │   ├── lib/                    # 24 个 Liberty 文件，覆盖全部 PVT corner
+│   │   │   ├── sky130_fd_sc_hs__tt_025C_1v80.lib            # ★ typical 角 (综合主用)
+│   │   │   ├── sky130_fd_sc_hs__tt_025C_1v80_ccsnoise.lib   # CCS noise 版
+│   │   │   ├── sky130_fd_sc_hs__ff_n40C_1v95.lib            # fast-fast 角
+│   │   │   ├── sky130_fd_sc_hs__ss_150C_1v60.lib            # slow-slow 角
+│   │   │   ├── ... (其它 voltage / temperature 组合)
+│   │   ├── lef/sky130_fd_sc_hs.lef                          # ★ Innovus PnR 用
+│   │   └── verilog/                                          # 仿真用 (gate-level)
+│   │       ├── primitives.v
+│   │       ├── sky130_fd_sc_hs.v
+│   │       ├── sky130_fd_sc_hs__blackbox.v
+│   │       └── sky130_fd_sc_hs__blackbox_pp.v
+│   ├── sky130_fd_sc_hd/            # high-density 标准单元 (赛题没指定，可不用)
+│   ├── sky130_fd_sc_hdll/          # high-density low-leakage
+│   ├── sky130_fd_sc_ms/            # medium-speed
+│   ├── sky130_fd_sc_ls/            # low-speed
+│   ├── sky130_fd_sc_lp/            # low-power
+│   ├── sky130_fd_io/               # IO cells
+│   └── sky130_fd_pr/               # primitives (R/C/L、各种器件)
+└── libs.tech/                      # 工具链配套
+    ├── librelane/sky130_fd_sc_hs/  # synth dont_use / fa_map / latch_map / mux2_map / mux4_map / rca_map / tribuff_map
+    ├── magic/                      # Magic 版图
+    ├── ngspice/                    # SPICE 模型
+    ├── netgen/                     # LVS 比对
+    └── openroad/                   # OpenROAD/OpenLane 配套
+```
+
+**注意里面没有 Innovus tech LEF（`*tech.lef` / `*.tlf`）**，PnR 阶段需要从 SkyWater 仓库的 `libs.tech/cadence/` 自己合一份；但 **Genus 综合不需要 tech LEF**，只需要 `.lib` + `dont_use` 即可。
+
+### 5.4 为什么是 `_fd_sc_hs` 而不是 `_fb_sc_hs`
+
+readMe 里的 `sky130_fb_sc_hs` 在 PDK 包里**根本不存在**，列出 `libs.ref/` 下所有 `sky130_fd_sc_*` 目录可以确认：
+
+```
+sky130A/libs.ref/sky130_fd_sc_hd/
+sky130A/libs.ref/sky130_fd_sc_hdll/
+sky130A/libs.ref/sky130_fd_sc_hs/      ← 这个，HS = High Speed
+sky130A/libs.ref/sky130_fd_sc_lp/
+sky130A/libs.ref/sky130_fd_sc_ls/
+sky130A/libs.ref/sky130_fd_sc_ms/
+```
+
+`fd` = "Foundry Design"（SkyWater 自家命名前缀），`sc` = "Standard Cell"。所以正确库就是 `sky130_fd_sc_hs`。
+
+### 5.5 配套 SRAM IP（OpenRAM 生成）
+
+`/home/share/sky130_sram_0kbytes_1rw1r_32x64_2.zip`，解开后：
+
+```
+sky130_sram_0kbytes_1rw1r_32x64_2/
+├── sky130_sram_0kbytes_1rw1r_32x64_2.v          ← Verilog behavioral model（综合时 dont_touch）
+├── sky130_sram_0kbytes_1rw1r_32x64_2.lef        ← 物理 macro footprint（PnR 用）
+├── sky130_sram_0kbytes_1rw1r_32x64_2_TT_1p8V_25C.lib  ← Liberty (TT 1.8V 25C)
+├── sky130_sram_0kbytes_1rw1r_32x64_2.gds        ← 版图
+├── sky130_sram_0kbytes_1rw1r_32x64_2.sp         ← SPICE netlist
+├── sky130_sram_0kbytes_1rw1r_32x64_2.html       ← 数据手册
+├── delay_meas.sp / delay_stim.sp                ← 时序测量 testbench
+├── functional_meas.sp / functional_stim.sp      ← 功能测量 testbench
+└── ...
+```
+
+**32 words × 64 bits, 1 RW + 1 R 双口 SRAM**。Baseline 设计的 K/V buffer (~8.75 KB ≈ 280 words × 256 bits) 用不上这个 SRAM 形状，但作为 macro 例子可以学一下接口怎么接 Genus / Innovus。
+
+### 5.6 已落地：`tools/sky130_synth_hs/` — 符合赛题要求的综合环境
+
+旧版本 `tools/sky130_synth/` 用的是 `sky130_fd_sc_hd__tt_025C_1v80.lib`（HD 高密度），不符合赛题钦点。新目录 `tools/sky130_synth_hs/` 切到 `sky130_fd_sc_hs`：
+
+```
+tools/sky130_synth_hs/
+├── README.md                    环境说明 + 一键运行 howto
+├── PROGRESS.md                  Run #1 实际结果摘要 + Run #2 进度
+├── pack_and_upload.sh           本地: submission/baseline/rtl + scripts → tar → upload
+├── scripts/
+│   ├── genus_synth.tcl          Genus Tcl (HS lib, 10ns clk, catch 包裹 12 个 report)
+│   └── run.sh                   bash driver: 按需解 PDK → module load → genus -batch → 打包
+└── reports_run1/                Run #1 抢救下来的 3 份报告
+    ├── design.rpt               (DRC 全过)
+    ├── timing_top20.rpt         (top-20 worst, 每条 5 候选)
+    └── timing_max_head80k.rpt   (432KB timing_max 的前 80KB)
+```
+
+一键运行（本地 + 远端）：
+
+```bash
+# 本地
+bash tools/sky130_synth_hs/pack_and_upload.sh    # ~24KB tar，秒级
+
+# 远端 (/home/share/sky130A.tar.gz 按需解压到 /tmp/sky130_pdk，约 30s)
+python3 tools/cadence_runner.py exec \
+  'cd /tmp && rm -rf sky130_synth_hs && tar xzf "$HOME/neere/Start Mate Desktop/sky130_synth_hs.tar.gz" && cd sky130_synth_hs && nohup bash scripts/run.sh > /tmp/sky130_synth_hs/run_outer.log 2>&1 & echo PID=$!' \
+  --open-term --after 8000
+
+# 拉结果
+python3 tools/cadence_runner.py poll sky130_synth_hs_result_ --timeout 25200 --interval 120
+python3 tools/cadence_runner.py download sky130_synth_hs_result_<TS>.tar.gz ./
+```
+
+### 5.7 实际测量结果 (Run #3, 2026-04-20, 完整数据)
+
+> Run #1 和 Run #2 都因 Tcl bug 没拿全报告，**Run #3 的数据才是本 PR 的最终结果**。踩过的三个 bug 详见 `tools/sky130_synth_hs/PROGRESS.md`。
+
+**Clock period 10 ns (100 MHz) 收敛成功**，`flash_attention_top` 所有关键指标：
+
+| 指标 | 值 | vs 赛题要求 |
+|---|---:|---|
+| Technology | `sky130_fd_sc_hs__tt_025C_1v80` | ✅ 官方钦点 |
+| **Worst Setup Slack** | **+1101.6 ps ✅ MET** | TNS=0, 违规路径 0 |
+| Data Path Delay | 8525 ps (85% of 10000 ps) | 1102 ps 余量 |
+| **Total Cell Count** | **3,555** (Sequential 1242 / Combinational 2313 / Hier 10) | |
+| **Total Cell Area** | **75,987.935 μm²** | |
+| **NAND2-equivalent gates** | **15,847** | 赛题预算 ≤ **2,000,000**，占 **0.79%** ✅ 大幅富余 |
+| **Total Power** (vectorless) | **11.12 mW** (leak 0.01% / internal 87.8% / switching 12.2%) | 注：Baseline 只给估算，精确值需 VCD-driven |
+| **DRC** | max_trans ✅ / max_cap ✅ / max_fanout ✅ | 3/3 通过 |
+| 预估 fmax | ~105-110 MHz | slack 1102ps 允许压到 8.9ns，留 5-10% 保守裕量 |
+| Wall time | 6 h 7 min | syn_generic 3h + syn_map 1.5h + syn_opt 1h + reports 10min |
+| Memory peak | 23.6 GB | 服务器 1006 GB 绰绰有余 |
+
+Worst setup path：
+```
+Startpoint:  u_tile_ctrl/q_idx_reg[1]/CLK
+Endpoint:    u_tile_ctrl/dma_rd_addr_reg[63]/D
+```
+经过 tile_controller 里的 Wallace CSA 全加器乘法链（`q_idx * stride` 类似的 DMA 地址计算）。
+
+**子模块面积分布**（占全 top 的百分比）：
+
+| 模块 | Cell | NAND2-eq gates | 占比 |
+|---|---:|---:|---:|
+| u_tile_ctrl (tile_controller)  | 1599 | 4601 | 29.0% |
+| u_dma (dma_engine + axi4_master) | 709 | 4984 | 31.5% |
+| u_axil (axi4_lite_slave)       | 845 | 4962 | 31.3% |
+| u_compute (compute_core)        | 272 | 854  | 5.4% |
+| hierarchy overhead              | 130 | ~445 | ~2.8% |
+
+观察：**90% 面积在控制/接口**（tile_ctrl + dma + axil），真正做 SDPA 计算的 `u_compute` 只有 5.4%。这跟 FlashAttention-style "低中间存储" 设计特性吻合——控制流复杂度高，算术单元相对小。
+
+syn_generic 6 partition 摘要：
+
+| Partition | Done Cell-Count | Done Slack (ns) | Elapsed |
+|---:|---:|---:|---:|
+| pbs_genopt_0 | 6,401 | -0.46 | 56 s |
+| pbs_genopt_1 | 194,710 | -0.84 | 2,160 s |
+| pbs_genopt_2 | 74,417 | -0.87 | 1,119 s |
+| pbs_genopt_3 | 954,036 | +2.85 | 3,142 s |
+| pbs_genopt_4 | **5** ← 塌缩 | +0.37 | 70 s |
+| pbs_genopt_5 | 1,602,278 | -31.92 | 10,404 s (2h53min 单 partition) |
+
+> ⚠️ `pbs_genopt_4` 从 39,420 塌缩到 5 cell：partition 里的逻辑被常数折叠光了，或 `SYNTHESIS` 宏关掉了某路径。值得回 RTL 查。
+
+**综合后产物**（已保留在 `tools/sky130_synth_hs/reports_run3/`）：
+
+- 11 份报告 (design/timing_max/timing_top20/area/area_summary/area_detail/gates_nand2eq/qor/power/messages/clock_gating)
+- `flash_attention_top_netlist.v` (1.9 MB, 35270 行 gate-level netlist)
+- `flash_attention_top.sdc` (67.7 KB, 综合工具写出的 SDC，供 Innovus PnR 用)
+
+### 5.8 踩过的坑（综合阶段，务必写进脚本）
+
+下列问题都在 Run #1/#2 实际踩过，写这里供下一位（下一个 cloud agent / 队友）参考。
+
+**⚠️ Genus 25.12 里 `report_area -hierarchy` 已被移除。**
+
+```
+Error : An invalid option was specified. [TUI-204] [parse_options]
+        : An option named '-hierarchy' could not be found.
+```
+
+旧版本的 Tcl script（包括 `tools/sky130_synth/scripts/genus_synth.tcl`）用 `-hierarchy`，在 25.12 上直接 abort，后续 `write_hdl` / `write_sdc` 全部跳过，**6 小时综合白跑**。改成 `-depth <N>` 即可。
+
+**⚠️ Genus Tcl 脚本里任何一条 `report_*` 失败都会整条 abort**，所以全部 report 应该用 `foreach + catch {}` 包裹；并且 **`write_hdl` / `write_sdc` / `write_db` 必须放在所有 report 之前**（保底，哪怕报告全挂至少还有 netlist）。模板见 `tools/sky130_synth_hs/scripts/genus_synth.tcl` 末尾的 `foreach {fname cmd}` 块。
+
+**⚠️ Genus `report_*` 命令把报告打到 stdout，Tcl 返回值是空字符串。** 所以下面这段看着对的 Tcl 实际是**写空文件**：
+
+```tcl
+# 错的: reports/area.rpt 只有 1 字节 (换行)
+set fh [open "reports/area.rpt" w]
+puts $fh [report_area -depth 10]
+close $fh
+```
+
+正确用 Genus Tcl 的 `>` redirect 语法（不是标准 Tcl，是 Genus 扩展）：
+
+```tcl
+# 对: 报告文本正常写入
+eval "report_area -depth 10 > reports/area.rpt"
+```
+
+踩过这个坑一次：Run #3 的 reports/*.rpt 全部是 1 字节空文件，真实报告文本全打到了 `/tmp/sky130_synth_hs/genus.log` 里（因为 stdout 被 bash 的 `genus ... > genus_run.log` 捕获）。最后是从 log 里按 `report OK:` 分隔符切回来的。
+
+**⚠️ 不要 `set_db lef_library <sky130 cell LEF>`。** SkyWater 的 `sky130_fd_sc_hs.lef` 引用了 `li1` / `met1` / `pwell` / `nwell` 等层，这些层只在 **Cadence tech LEF** 里定义，而 `/home/share/sky130A.tar.gz` 里**没有** Cadence 兼容的 tech LEF（有 `libs.tech/openroad/` / `librelane/` / `magic/` 但都不是 Innovus 口径）。强行 `lef_library` 会：
+
+```
+Error : Undefined pin layer detected. [PHYS-148] : layer 'li1' ...
+Error : No capacitance or resistance specified. [PHYS-10] : Specify the tech LEF first.
+Error : Cannot change the value of the attribute [TUI-48]
+```
+
+Genus 综合本来就不需要 cell LEF（只需要 .lib），所以**直接不加载**就行。PnR 阶段（Innovus）才会绕不开 tech LEF 这件事，下一步需要联系助教要或自己拼一份。
+
+**⚠️ FILES tab 上传同名文件的行为非常坑，踩过两次。** 实测规律：
+
+1. 远端 NFS 已有 `foo.tar.gz`，这个文件实际落在 `$HOME/neere/Start Mate Desktop/foo.tar.gz`
+2. `cadence_runner.py rm foo.tar.gz` 可能返回 "not found"（因为 FILES 列表里的名字和 NFS 里的名字有微妙差异，或者被其它 session 锁住）
+3. 接着 `cadence_runner.py upload foo.tar.gz` **不会替换原文件**，而是在 FILES tab 里多出一条叫 `foo.tar(1).gz` / `foo.tar(2).gz` 的条目
+4. 远端磁盘 NFS 实际看到会有 **3 个文件共存**：`foo.tar.gz`（旧）、`foo.tar(1).gz`、`foo.tar(2).gz`（最新）
+5. 脚本里 `tar xzf "$HOME/neere/Start Mate Desktop/foo.tar.gz"` 展开的还是**最旧的那个**
+
+建议流程（改 Tcl 后 safe 重跑）：
+
+```bash
+# 本地 pack
+bash tools/sky130_synth_hs/pack_and_upload.sh
+# 远端：强制清理+检验
+python3 tools/cadence_runner.py exec 'cd "$HOME/neere/Start Mate Desktop" && rm -f sky130_synth_hs.tar.gz "sky130_synth_hs.tar(1).gz" "sky130_synth_hs.tar(2).gz"; ls -la sky130_synth_hs*.tar.gz 2>&1' --after 5000
+# 这时 FILES 上应该什么都没有；再 upload
+bash tools/sky130_synth_hs/pack_and_upload.sh
+# 验证 md5 匹配本地
+md5sum /tmp/sky130_synth_hs.tar.gz
+python3 tools/cadence_runner.py exec 'md5sum "$HOME/neere/Start Mate Desktop/sky130_synth_hs.tar.gz"' --after 5000
+```
+
+如果 md5 不一致，说明 FILES 还在缓存旧版本，改用带时间戳的文件名（例如 `sky130_synth_hs_$(date +%H%M%S).tar.gz`）绕过。
+
+**代价**：Run #2 就是因为这个坑，6 小时的综合重跑**完全浪费**——启动时用的是 Run #1 的旧 tcl，所以同样在 `report_area -hierarchy` abort。发现方法：登录远端 `ls -la "$HOME/neere/Start Mate Desktop/" | grep sky130_synth_hs` 看文件名是不是真的是 `.tar.gz`（正常），还是 `.tar(N).gz`（中招）。
+
+**⚠️ Genus 的 log 是大缓冲写盘，不是行缓冲。** `/tmp/sky130_synth_hs/genus.log` 可能 1 小时都不刷新，但进程 `ps -p $PID -o state` 显示 S(sleeping) + `wchan=core_sys_select` → 表示正在 socket 上等 PBS worker 响应，**不是死掉**。不要 `pkill` 它。真死了会 Z(zombie)。
+
+**⚠️ PBS 子任务 (`pbs_genopt_*` / `pbs_fcopt_*` / `pbs_map_*`) 的 `_post.db` 出现时间滞后于 log**。实际判断一个 partition 是否跑完，用 `ls /tmp/sky130_synth_hs/.pbs_*/` 看 `_post.db` 文件更可靠。
+
+**⚠️ `pbs_genopt_4 → 5 cells` 塌缩是 tile_controller 里某个 partition 被常数折叠，不是 bug**（Run #1/Run #2 都出现）。不影响整体功能，但提示 RTL 有可清理的死代码。
+
+**⚠️ session 断开后 `remote_exec` 第一次调用会 `iframe never appeared`**。先 `python3 tools/cadence_runner.py probe`（触发 Start remote）再 sleep 30s 再 `exec --open-term` 就稳。
+
+**⚠️ Cadence Cloud VNC proxy 会抽风（实测过两次）**：长时间综合跑着期间，VNC 侧可能返回：
+
+- `Internal server error / ERROR 500`（VNC proxy 后端挂了）
+- `Loading external app...` 卡死超过 30 分钟（App Presenter 启不起来）
+
+VNC 不可用时：
+
+- `list` / `upload` / `download` **不受影响**（走 REST API，不经过 VNC）
+- `exec` / `peek` **全部不可用**（`noVNC iframe never appeared`）
+- 远端服务器上正在跑的 Genus / xrun 等批处理任务**不受影响**（它们不依赖 VNC，VNC 只是键鼠通道）
+
+应对：
+1. 只靠 FILES tab 交付（`run.sh` 里把日志/结果 `cp "$HOME/neere/Start Mate Desktop/"`，本地靠 `poll` + `download` 拉回）
+2. 不要在 VNC 出问题时 kill session；批处理会继续
+3. 等 VNC proxy 自己恢复（实测半小时到几小时不等）
+
+这条坑的具体意义：**cadence_runner.py 的 `run-synth` 全自动流程必须做成"启动后 VNC 就不再需要"**——把所有结果走 FILES tab 回收，而不是每隔几分钟截图 peek。
+
+### 5.9 没跑通 / 待解决
+
+- **Innovus PnR**: `/home/share/sky130A.tar.gz` 不带 Cadence tech LEF (`*_tech.lef` / `*.tlf`)。Sky130 上社区有两种办法：
+  (a) 用 OpenROAD 的 tech LEF，手工转 Cadence 格式（可能踩 extraction decks 不对的坑）
+  (b) 向 `shanshan@cadence.com` 发邮件要"Innovus tech LEF for sky130_fd_sc_hs"
+  - 估计（b）靠谱，SkyWater 官方其实有 Cadence-ready 包，只是助教没放在 `/home/share/` 里
+- **Power 报告**: Run #1 没落盘。`report_power` 在 Genus 里只给 **估算功耗**（不做 signal switching activity analysis），要真实功耗需要走 Joules 流程，读 VCD/SAIF。
+- **fmax 极限试探**: 目前设 10 ns (100 MHz) 收敛 + 1102 ps slack，理论可以压到 9.1 ns (110 MHz)。建议 Run #3 试 9.0 ns，Run #4 试 8.5 ns，找到真实极限。
+
+### 5.10 旁证：NFS server 上其它 PDK 卷（仅记录用，无法直接用）
+
+NFS 服务器 `shstna02` export 了大量工艺库 volume：
 
 ```
 /vol/tsmc28hpc_IN00051633         /vol/tsmc28hpcp_IN00180494
@@ -158,48 +455,13 @@ NFS 服务器 `shstna02` 确实 export 了大量工艺库 volume（`showmount -e
 /vol/PROCESS                      (还有 100+ 个其它设计工程专用卷)
 ```
 
-**但是**：本机 autofs map 没有给它们分配 `/projects/<foo>` 或 `/proj/<foo>` 的 key，普通用户**无法手动 `mount.nfs`**（需要 root）。`autoproj list` 也失败（`/home/cm_admin/autoproj` 都不存在）。
+但 autofs map (`/etc/auto.master.d/` 空) 没给它们分配 `/projects/<foo>` 或 `/proj/<foo>` 的 key，普通用户无法手动 `mount.nfs`（需要 root），也无法直接读。这些是 Cadence 内部其它项目占的卷，不是给本次比赛用的。
 
-### 5.4 路线选择
+### 5.11 VM 网络（已实测）
 
-| 方案 | 可行性 | 代价 |
-|---|---|---|
-| 联系管理员要求挂载 PDK 模块 | 最标准 | 得打 ticket，不可控 |
-| 自带自己有版权的 PDK（TSMC / SMIC edu 等） | 可行 | 要确认版权合规 |
-| 用开源 PDK（Sky130、NanGate45、FreePDK45、ASAP7） | 可行 | 需从本地下载好后整包上传（VM 未验证能不能上公网） |
-| 跳过综合，只做 xrun 仿真 | 现在就能跑 | 拿不到面积/时序/功耗报告 |
-| Genus `generic` lib 空跑 elab | 现在就能跑 | 只能验证 RTL 语法/层次，无真实指标 |
-
-### 5.5 VM 网络（已实测）
-
-* DNS 解析**不通**：`/etc/resolv.conf` 是空的，`curl https://github.com` 直接 `Could not resolve host`。
-* TCP/443 直连 **可以**：`curl --resolve raw.githubusercontent.com:443:185.199.108.133 https://raw.githubusercontent.com/...` 能下载到内容。
-* 实际选择：**先本地下载 → 打 tar → FILES 上传** 仍是最稳的路子，避免每次都猜 GitHub Pages CDN IP。
-
-### 5.6 已落地：Sky130 综合环境
-
-仓库的 `tools/` 目录里已经准备好了一个 Sky130 综合包结构（`sky130_synth/`），包括：
-
-```
-sky130_synth/
-├── lib/
-│   └── sky130_fd_sc_hd__tt_025C_1v80.lib   # 12.8 MB，从 efabless/skywater-pdk-libs-sky130_fd_sc_hd 拉的 typical 角
-├── rtl/                                     # 从 submission/rtl 同步过来
-├── scripts/
-│   ├── genus_synth.tcl                      # Genus 综合脚本（read_hdl → elaborate → syn_generic → syn_map → syn_opt → reports）
-│   └── run.sh                               # bash 驱动器：source modules → genus -batch → tar 结果到 FILES
-```
-
-打包上传执行：
-
-```bash
-tar czf sky130_synth.tar.gz sky130_synth/
-python3 tools/cadence_runner.py upload sky130_synth.tar.gz
-python3 tools/cadence_runner.py exec 'cd /tmp && tar xzf "$HOME/neere/Start Mate Desktop/sky130_synth.tar.gz"'
-python3 tools/cadence_runner.py exec 'cd /tmp/sky130_synth && nohup bash scripts/run.sh > /tmp/sky130_synth/genus_run.log 2>&1 &'
-```
-
-实测：`flash_attention_top` 在 Sky130 上 generic 后膨胀到 **3,751,602 cells**，分 6 个 PBS partition 并行优化（最大单个 197 万 cells），`syn_generic` 阶段需要 30min - 2h，整轮 + map + opt 容易超过 2 小时。内存峰值 ~15 GB。
+* DNS 解析**不通**：`/etc/resolv.conf` 是空的
+* TCP/443 直连 **可以**：`curl --resolve <host>:443:<ip> https://...` 能下载
+* **现在不需要再走外网**：PDK 已在 `/home/share/`，直接读即可
 
 ---
 
@@ -236,6 +498,7 @@ python3 tools/cadence_runner.py exec 'cd /tmp/sky130_synth && nohup bash scripts
 | `download` 输出目录有 trailing slash | 实际写到 `<dst>/<name>` 而不是 `<dst>` 本身 | 目标目录传不带 slash，或用 `download <name> /tmp/x` 然后从 `/tmp/x/<name>` 读 |
 | `cd /tmp/sky130_synth 2>/dev/null && ...` 静默失败 | 路径不存在时整条命令被短路 | 状态收集命令不要用 `cd ... && ...`，用绝对路径直接操作 |
 | storage_state 偶发失效 | iframe never appeared | 重跑一次 / `login` 子命令再登一遍 |
+| 远端会话刚启动时桌面没有终端窗口 | `exec` 把命令打到空桌面、键盘焦点丢失、什么都不发生（不会报错） | 第一条 `exec` 加 `--open-term`：自动右键 → "Open in Terminal" 开一个新 Mate Terminal 再发命令；之后窗口常驻就可以裸用 `exec` |
 
 ---
 
@@ -248,27 +511,29 @@ python3 tools/cadence_runner.py exec 'cd /tmp/sky130_synth && nohup bash scripts
 
 ---
 
-## 9. 当前进度快照（2026-04-20 凌晨）
+## 9. 当前进度快照（2026-04-20）
 
 **已完成：**
 
-- [x] 服务器侦察：模块系统、工具版本、文件系统、license 全摸清，无 PDK 这件事拿到决定性证据
-- [x] 网络情况摸清：DNS 不通，TCP/443 直连可达，结论是走"本地下载 + FILES 上传"
-- [x] Sky130 typical 角 liberty (`sky130_fd_sc_hd__tt_025C_1v80.lib`, 12.8MB) 拉到本地
-- [x] Genus Tcl 脚本 + bash 驱动写好，整包 tar 上传到 FILES
-- [x] 远端解压、`module load license ddi`、`nohup genus -batch -no_gui -files scripts/genus_synth.tcl` 已经在跑（PID 1800373，6 partition × 8 super-thread workers，phys mem 15GB peak）
+- [x] 服务器侦察：模块系统、工具版本、文件系统、license 全摸清
+- [x] **官方 PDK 找到**：`/home/share/sky130A.tar.gz` (1.51GB, sky130_fd_sc_hs)、`/home/share/sky130_sram_*.zip` (OpenRAM macro)、`/home/share/RAK.tar` (Cadence 教程)、`readMe.txt` 由助教 `shanshan@cadence.com` 维护，钦点用 `sky130_fd_sc_hs`（详见 §5）
+- [x] 网络情况摸清：DNS 不通，TCP/443 直连可达；但 **PDK 既然在远端 NFS，本地下载 + 上传不再必要**
+- [x] **`tools/sky130_synth_hs/` 落地**：HS 版 Genus 综合环境（README + pack_and_upload.sh + genus_synth.tcl + run.sh + PROGRESS.md），详见 §5.6
+- [x] **综合跑通（Run #3 full reports）**：100 MHz MET slack +1102 ps，cell count 3555, total area 76k μm², NAND2-equivalent **15,847 门 (赛题预算的 0.79%)**, 功耗 11.12 mW。数据在 §5.7，完整报告在 `tools/sky130_synth_hs/reports_run3/`
+- [x] 发现并记录 Genus 25.12 的多个坑（`-hierarchy` 移除、Tcl abort 级联、cell LEF 不可加载、`report_*` 返回空字符串需走 `>` redirect、FILES upload 不覆盖同名、VNC proxy 会抽风）：§5.8
 - [x] **修复 noVNC 长字符串打字 keyup 丢失 bug**（`Desktop.type` 改成显式 down/up，60ms/char + 每 16 char sleep 120ms）
-
-**进行中：**
-
-- [ ] 等 `syn_generic` / `syn_map` / `syn_opt` 完成（按 syn_generic 已用 7+ 分钟、最大 partition 1.98M cells 估算总时长 1-3h）
+- [x] **修复 `remote_exec` 在终端不存在时无声失败**（新增 `--open-term` 选项，attach 后右键空桌面 "Open in Terminal" 再发命令）
+- [x] **加固 `pack_and_upload.sh`**：上传前强制清理远端所有同名 tar 变体 + md5 校验
 
 **待办：**
 
-- [ ] `run.sh` 跑完会自动把 `reports/` + `results/` + `genus_run.log` 打成 `sky130_synth_result_<TS>.tar.gz` 落到 FILES，下载下来分析
-- [ ] 解析 timing / area / power / qor 报告
-- [ ] 关注 `pbs_genopt_4` 那块 39428 → 5 cells 的塌缩，回头查 RTL 是否有未使用 / 复位锁死的死代码
-- [ ] `run_flow()` 全自动化补齐：upload → exec → poll → download → 解析
+- [ ] 回 RTL 查 `pbs_genopt_4` 塌缩根因（39,420 → 5 cells，tile_controller 某 partition 被常数折叠）
+- [ ] 评估 Innovus PnR：`/home/share/sky130A.tar.gz` 没带 Cadence tech LEF；需要向助教要或自己合一份
+- [ ] `fmax` 极限试探：按 Run #3 slack 1102ps，把周期压到 9.0 ns 跑一次（应该还能 MET），再试 8.5 ns 找真实极限
+- [ ] Bonus 版本（submission/bonus/rtl）跑一轮综合，对比 baseline vs bonus 的 area/fmax
+- [ ] `cadence_runner.py` 加一个 `run-synth` 子命令封装整个 upload → exec → poll → download 流程
+- [ ] VCD-driven power：xrun 跑出 VCD/SAIF → Joules 读入出精确功耗（现在是 vectorless 估算）
+- [ ] 清理旧 `tools/sky130_synth/` 目录（或保留作 HD 对比基线？需要用户决定）
 
 ## 10. 仓库结构（GitHub）
 
