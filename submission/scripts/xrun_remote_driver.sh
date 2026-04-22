@@ -21,6 +21,8 @@ TAG=${TAG:-$(date +%Y%m%d_%H%M%S)}
 OUTDIR=/tmp/fa_xrun
 FILES_TAB="$HOME/neere/Start Mate Desktop"
 
+# Clean stale outputs from previous runs so the summary can't pick up old logs
+rm -rf "$OUTDIR"
 mkdir -p "$OUTDIR"
 : > "$OUTDIR/driver.log"
 exec > >(tee -a "$OUTDIR/driver.log") 2>&1

@@ -189,12 +189,11 @@ module fa_tb_top;
             $dumpvars(0, fa_tb_top);
         end
         if ($test$plusargs("DUMP_SHM")) begin
-            string shm_path;
-            if (!$value$plusargs("SHM_PATH=%s", shm_path))
-                shm_path = "waves.shm";
-            $shm_open(shm_path);
+            // Xcelium 24.09 的 $shm_open 不支持 string 变量 (xmelab: *E,STRNOT)
+            // 这里固定文件名；路径由 xrun 在工作目录内/目录外经由 cwd 选择。
+            $shm_open("waves.shm");
             $shm_probe(fa_tb_top, "AS");
-            $display("[fa_tb_top] SHM dump enabled -> %s (probe: fa_tb_top / AS)", shm_path);
+            $display("[fa_tb_top] SHM dump enabled -> ./waves.shm (probe: fa_tb_top / AS)");
         end
     end
 

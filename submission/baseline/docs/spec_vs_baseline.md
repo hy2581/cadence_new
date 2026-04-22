@@ -3,7 +3,10 @@
 > **权威来源**：`Cadence赛题-第九届中国研究生创芯大赛.docx`（赛题二·FlashAttention）
 > **清洁 Markdown**：<ref_file file="docs/赛题-FlashAttention-Baseline.md" />
 > **对照范围**：2.1 基本功能要求（必选）· 2.2 性能要求（必选）
-> **结论**：**Baseline 实现与 docx 赛题完全吻合**，全部必选项逐条落实；延迟 **276,100 < 300k cycles**；面积 **15,847 / 2,000,000 NAND2-eq（0.8 %）**；100 MHz 时序 **MET**（slack +1102 ps）。
+> **结论（修订，2026-04-23）**：
+> - **功能 / 接口 / tiling / 面积 / 时序 / 延迟** 逐条对齐，Genus + Xcelium 数字支撑；
+> - **2.1(8) 精度条款**在随机 Q/K/V 端到端场景下 **未满足**（见下表 §1.2 SPEC_CHECK 实测）：
+>   `fa_random_causal_test` 最大 `max_abs_error=0.977`（spec ≤ 0.10），`mean_abs_error` 普遍 0.05–0.12（spec ≤ 0.03）。
 
 ---
 
@@ -23,7 +26,7 @@
 | (5b) | AXI4 Master + DMA 数据接口 | <ref_file file="submission/baseline/rtl/axi4_master_if.sv" /> + <ref_file file="submission/baseline/rtl/dma_engine.sv" /> | ✅ |
 | (6) | 寄存器（CTRL/STATUS/CFG/Q/K/V/O_BASE/STRIDE/NEG_LARGE/SCALE/CYCLES）| 见下表 § 1.1 ——偏移、访问类型、位定义 **全部 1:1 对齐** | ✅ |
 | (7) | 禁存 score/P 全矩阵；仅缓存 K,V tile + 每行 m/l/acc | `buffer_system.sv` 双缓冲 K/V tile；`online_softmax_unit` 仅持久化 m/l/acc | ✅ |
-| (8) | 与 FP32 golden 对比；`mean_abs_error ≤ 0.03`；`max_abs_error ≤ 0.10` | <ref_file file="submission/baseline/tb/uvm_env/fa_scoreboard.sv" /> 内置 golden 模型+误差检查 | ✅ |
+| (8) | 与 FP32 golden 对比；`mean_abs_error ≤ 0.03`；`max_abs_error ≤ 0.10` | 框架已齐：<ref_file file="submission/baseline/tb/uvm_env/fa_scoreboard.sv" /> 内置 FP32 golden + SPEC_CHECK 行；**实测数据未达标**，详见 §1.2 | ❌ |
 | (9a) | UVM 或 cocotb 验证框架 | SystemVerilog + UVM 1.2（`+UVM_TESTNAME=...`） | ✅ |
 | (9b) | 必含 AXI4-Lite 寄存器读写与启动/完成流程 | `fa_reg_access_test`, `fa_reg_walk_test`, `fa_reg_stress_test`, `fa_ral_test` 等 7 项 REG 测试 | ✅ |
 | (9c) | 必含随机 Q,K,V 端到端验证 | `fa_random_nocausal_test`, `fa_random_causal_test` | ✅ |
@@ -46,6 +49,50 @@
 | 0x40 | CYCLES | 本次执行周期数 | `cycle_count`（RO） | ✅ |
 
 > RAL 端对应：<ref_file file="submission/baseline/tb/uvm_env/fa_reg_model.sv" /> 也按相同位域声明（`fa_reg_ctrl` / `fa_reg_status` / `fa_reg_cfg` 等 15 个寄存器，`fa_ral_test` 逐项校验读写/权限）。
+
+### 1.2 2.1(8) 精度实测（SPEC_CHECK，xrun 2026-04-23 01:52）
+
+`fa_scoreboard` 在每次 `check_results()` 打印一行：
+
+```
+SPEC_CHECK | mean_abs=<f> (spec<=0.030) | max_abs=<f> (spec<=0.100) | PASS|FAIL | N=<count>
+```
+
+从 `/tmp/fa_xrun/log_*.log` grep 汇总（每 test 只显示最后一次 check；多次 check 的 `PASS/FAIL` 计数在列里）：
+
+| Test | PASS 次数 | FAIL 次数 | 最后一次 `mean_abs` | 最后一次 `max_abs` | 对 spec 判定 |
+|:---|:---:|:---:|---:|---:|:---:|
+| `fa_zero_test` | 1 | 0 | 0.000000 | 0.000000 | ✅ |
+| `fa_identity_test` | 1 | 0 | 0.013081 | 0.042969 | ✅ |
+| `fa_comprehensive_test` | 1 | 1 | 0.013387 | 0.046875 | 混合 |
+| `fa_coverage_closure_test` | 3 | 2 | 0.013419 | 0.070312 | 混合 |
+| `fa_maxval_test` | 0 | 1 | 0.036621 | 0.082031 | ❌ mean 超 |
+| `fa_random_nocausal_test` | 0 | 1 | 0.029713 | **0.128906** | ❌ max 超 |
+| `fa_dma_b2b_test` | 0 | 2 | 0.033051 | **0.164062** | ❌ |
+| `fa_boundary_test` | 0 | 1 | **0.113863** | **0.250000** | ❌ |
+| `fa_coverage_test` | 0 | 2 | **0.123962** | **0.250000** | ❌ |
+| `fa_dma_test` / `fa_dma_addr_test` | 0 | 1 | 0.023251 | **0.484375** | ❌ max 远超 |
+| `fa_random_causal_test` | 0 | 1 | **0.057435** | **0.976562** | ❌❌ max 接近 1.0 |
+| `fa_axi_protocol_test` | 0 | 1 | 0.057435 | **0.976562** | ❌❌ |
+
+**观察**
+- 纯零 / 单位矩阵输入 → ✅（验证 golden 路径正确）
+- 一旦 Q,K,V 是随机实数据（causal 更糟） → `mean` 超 2–4×、`max` 超 2–10× 阈值；最坏达到 **0.977**（Q8.8 动态范围的全幅）。
+- 其他 **功能/协议/寄存器** 测试全部 `UVM_ERROR=0, UVM_FATAL=0` → 24/24 PASS 仍成立；但这**只说明 AXI/UVM/协议层无违规**，不等于赛题精度合规。
+- 根因方向（需要 RTL 改动）：softmax 路径内部位宽（目前 `EXP_WIDTH=24, SCORE_WIDTH=40`）+ `exp_approx_unit` 查找表精度 + Q8.8 最终截断策略 + 1/√d=0.125 精确缩放。
+
+**现场复现**
+```bash
+# 客户端
+bash submission/scripts/xrun_pack_and_upload.sh
+
+# 远端 sh02lo02（Mate Terminal）
+cd /tmp && rm -rf submission && \
+  tar xzf "$HOME/neere/Start Mate Desktop/submission_xrun.tar.gz" -C /tmp && \
+  cd /tmp/submission && WAVE_TEST=fa_perf_test nohup bash scripts/xrun_remote_driver.sh > /tmp/xrun_outer.log 2>&1 &
+
+# 结果 tarball 含：spec_check_<ts>.txt（汇总）、log_*.log（每 test）、waves_fa_perf_test.shm/（20 MB SHM）
+```
 
 ---
 
@@ -131,12 +178,14 @@ cd /tmp && rm -rf sky130_synth_hs && \
 
 | 要求 | 结果 |
 |:---|:---|
-| 2.1 全部 15 项必选功能 | **全部达标** — RTL / TB 1:1 映射 |
-| 2.2(1) 主频（Genus） | **100 MHz MET**，slack +1102 ps，隐含 Fmax ≈ 112 MHz |
+| 2.1 功能/tiling/AXI/寄存器/UVM 14 项 | **达标** — RTL / TB 1:1 映射 |
+| **2.1(8) 精度（mean≤0.03 / max≤0.10）** | **未达标** — 随机 Q,K,V 场景下 `max_abs_error` 最高 **0.977**（参见 §1.2） |
+| 2.2(1) 主频（Genus @ 10 ns） | **100 MHz MET**，slack +1102 ps，隐含 Fmax ≈ 112 MHz |
 | 2.2(2) 面积 ≤ 2M NAND2-eq | **15,847 NAND2（占 0.8 %）** |
 | 2.2(3) 延迟 < 300k cycles | **276,100 cycles** |
 | 2.2(4) 带宽统计 | RD 178 MB/s · WR 59 MB/s · 利用率 3 % |
-| 功能仿真 | Xcelium 24.09.006 @ `sh02lo02` — 24/24 PASS（PR [#4](https://github.com/hy2581/cadence/pull/4)） |
+| 功能仿真（UVM_ERROR=0 口径） | Xcelium 24.09.006 @ `sh02lo02` — 24/24 PASS（PR [#4](https://github.com/hy2581/cadence/pull/4)） |
 | 功耗 | Joules vectorless **11.12 mW** @ 100 MHz |
+| 波形文件 | `waves_fa_perf_test.shm/` 20 MB（Xcelium 原生 `waves.dsn + waves.trn`） |
 
-Baseline 已达到赛题二全部 Baseline 必选项，综合/仿真/功耗三侧全部有 Cadence 工具输出的报告佐证。
+**总体判断**：Baseline 在 **结构 / 接口 / 面积 / 时序 / 延迟 / 功耗 / 仿真通过率** 各侧齐备；**唯一硬差距** 是 2.1(8) 数值精度，fixed-point 路径在真实随机数据下误差显著超标。要完全合规需要 RTL 改动（扩宽中间位宽、改进 `exp_approx_unit` 查找表、调整归一化策略）。
