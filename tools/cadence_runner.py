@@ -487,7 +487,7 @@ class Desktop:
 
     @classmethod
     def attach(cls, page: Page, cfg: dict, *, do_join: bool = True,
-               wait_canvas_s: float = 60.0, wait_paint_s: float = 60.0) -> "Desktop":
+               wait_canvas_s: float = 300.0, wait_paint_s: float = 120.0) -> "Desktop":
         """Navigate to the room, optionally Join, then return a Desktop wrapper.
 
         Also waits until the canvas actually contains non-trivial pixels (i.e. the
