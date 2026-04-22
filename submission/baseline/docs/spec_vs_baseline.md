@@ -3,7 +3,7 @@
 > **权威来源**：`Cadence赛题-第九届中国研究生创芯大赛.docx`（赛题二·FlashAttention）
 > **清洁 Markdown**：<ref_file file="docs/赛题-FlashAttention-Baseline.md" />
 > **对照范围**：2.1 基本功能要求（必选）· 2.2 性能要求（必选）
-> **结论**：**Baseline 实现与 docx 赛题完全吻合**，全部必选项逐条落实；性能实测 276,100 cycles 优于 300k 上限。
+> **结论**：**Baseline 实现与 docx 赛题完全吻合**，全部必选项逐条落实；延迟 **276,100 < 300k cycles**；面积 **15,847 / 2,000,000 NAND2-eq（0.8 %）**；100 MHz 时序 **MET**（slack +1102 ps）。
 
 ---
 
@@ -51,14 +51,58 @@
 
 ## 2. 2.2 性能要求
 
+**Genus 物理综合已完成**，工艺库 `sky130_fd_sc_hs__tt_025C_1v80`（TT 25°C 1.8V），Genus 25.12-s067，详见 <ref_file file="tools/sky130_synth_hs/reports_run3/" />。
+
 | # | docx 赛题要求 | Baseline 实测 | 状态 |
 |:---|:---|:---|:---:|
-| (1) | 主频目标：越高越好（Genus 物理综合报告） | SDC 约束 500 MHz（<ref_file file="submission/baseline/constraints/flash_attention.sdc" />）；Genus 报告需另行生成 | ⚠️ 待综合 |
-| (2) | 等效逻辑门数 **≤ 200 万门** | 面积估算（综合前）远小于 200 万；需 Genus 综合后以 2-NAND 等效门计算 | ⚠️ 待综合 |
-| (3) | 单次 attention **< 300,000 cycles** | **276,100 cycles**（xrun 实测；从 `fa_perf_test` 统计） | ✅ |
+| (1) | 主频目标：越高越好（Genus 物理综合报告） | **100 MHz 约束下 MET，slack = +1102 ps → 隐含 Fmax ≈ 112 MHz**；Setup/Max-transition/Max-cap/Max-fanout 均无违例（<ref_file file="tools/sky130_synth_hs/reports_run3/qor.rpt" />、<ref_file file="tools/sky130_synth_hs/reports_run3/timing_max.rpt" />、<ref_file file="tools/sky130_synth_hs/reports_run3/design.rpt" />） | ✅ |
+| (2) | 等效逻辑门数 **≤ 200 万门**（2-NAND 口径） | **15,847 NAND2 等效门**（≈ 2M 上限的 **0.8 %**，共 3,555 leaf / 1,242 seq / 2,313 comb），详见 <ref_file file="tools/sky130_synth_hs/reports_run3/gates_nand2eq.rpt" />、<ref_file file="tools/sky130_synth_hs/reports_run3/area_summary.rpt" /> | ✅ |
+| (3) | 单次 attention **< 300,000 cycles** | **276,100 cycles**（xrun 实测；`fa_perf_test`） | ✅ |
 | (4) | `RD_BYTES / WR_BYTES` 统计与优化分析 | RD 178.0 MB/s、WR 59.3 MB/s、利用率 3.0%（<ref_file file="submission/baseline/docs/verification_report.md" /> § 2.2） | ✅ |
 
-> (1)(2) 两项由 Cadence Genus 综合器产出，当前仓库只跑了 Xcelium 仿真；下一步可在远端 `sh02lo02` 调用 `module load genus` 生成面积/时序报告以完整闭合。
+### 2.1 Genus Run #3 关键数字（2026-04-20 · `sh02lo02`）
+
+| 项 | 值 |
+|:---|:---|
+| Genus 版本 | 25.12-s067_1 |
+| 工艺库 | `sky130_fd_sc_hs__tt_025C_1v80`（Sky130A HS / TT 25 °C 1.8 V） |
+| 顶层 | `flash_attention_top` |
+| 时钟约束 | 10.0 ns（100 MHz），uncertainty 0.2 ns |
+| Setup 最差 slack | **+1102 ps**（MET） |
+| TNS / Violating paths | 0.0 / 0 |
+| Cell area（raw） | 75,987.935 μm² 等效 |
+| **Normalized NAND2-eq gates** | **15,847**（≤ 2,000,000 要求 **✓**） |
+| Leaf instances | 3,555（1,242 seq · 2,313 comb） |
+| Layer violations | Max-transition / Max-capacitance / Max-fanout 均无违例 |
+| Power（Joules vectorless） | **11.12 mW** 总（reg 8.49 mW / logic 2.63 mW） |
+| Runtime | 21,972 s wall / 4,084 s CPU |
+
+> **面积分布（主要模块）** — 单位：NAND2 等效门，来自 `area_detail.rpt`
+>
+> | 模块 | Gates | 说明 |
+> |:---|---:|:---|
+> | `u_dma` (DMA + AXI4 master) | 4,984 | 含 `u_axi_master` 2,637 |
+> | `u_axil` (AXI4-Lite slave + reg file) | 4,962 | 15 寄存器 |
+> | `u_tile_ctrl` | ~4,600 | tiling / 地址生成 / 主 FSM |
+> | `u_compute` | 854 | `u_dp` 99 + `u_oa` 340 + `u_softmax` 263 |
+> | 其他 | ~460 | buffer/mask/顶层 glue |
+
+### 2.2 综合流程复现
+
+```bash
+# 客户端（当前仓库根目录）
+bash tools/sky130_synth_hs/pack_and_upload.sh
+
+# 远端 sh02lo02（Mate Terminal 里，或 cadence_runner exec 代跑）
+cd /tmp && rm -rf sky130_synth_hs && \
+  tar xzf "$HOME/neere/Start Mate Desktop/sky130_synth_hs.tar.gz" && \
+  cd sky130_synth_hs && nohup bash scripts/run.sh > /tmp/sky130_synth_hs/run_outer.log 2>&1 &
+
+# 结果打包：$HOME/neere/Start Mate Desktop/sky130_synth_hs_result_<TS>.tar.gz
+# 然后 cadence_runner.py download 回本地
+```
+
+脚本：<ref_file file="tools/sky130_synth_hs/scripts/genus_synth.tcl" />、<ref_file file="tools/sky130_synth_hs/scripts/run.sh" />、<ref_file file="tools/sky130_synth_hs/pack_and_upload.sh" />。
 
 ---
 
@@ -76,16 +120,23 @@
 
 ## 4. 差异与遗留项
 
-仅存在 **两项可选** 差异，都是"文档/流程类"，不影响赛题合规性：
+本版本已闭合原来的 Genus 综合缺口；差异仅余一项流程性提示：
 
-1. **Genus 综合报告缺失**：docx 要求使用 **Cadence Joules / Genus** 输出等效逻辑门数与时序报告。当前仓库仅闭合了 Xcelium 仿真（PR [#4](https://github.com/hy2581/cadence/pull/4)），综合这一步尚未在 Cadence 云上执行。——建议作为下一任务，在远端 `sh02lo02` 上 `module load genus` 生成 `area/timing/power` 报告后补齐。
-2. **旧根目录 `FlashAttention加速器设计解决方案计划书.md`** 文件名与内容 Chinese 字符大面积缺失（每隔 1–2 个字符丢失），与 docx 不一致。本次不再修订该历史文稿，新增的 <ref_file file="docs/赛题-FlashAttention-Baseline.md" /> 作为 **docx 的等价 Markdown 版本** 供后续引用；若需要彻底替换旧文件，可在后续 PR 里删除旧 `.md`。
+- **Innovus PnR / 后仿真** 尚未在 Cadence 云上跑。赛题 2.2 指标要求的是 **Genus 物理综合报告**（已完成），PnR 不是必选项；鼓励方向，后续可选。
+- 原根目录 `FlashAttention加器计决划.md`（文件名与内容均破损）已在本 PR 删除；<ref_file file="docs/赛题-FlashAttention-Baseline.md" /> 作为 docx 的等价 Markdown，是后续唯一 Chinese 版参照。
 
 ---
 
 ## 5. 结论
 
-- **Baseline 实现与 docx 赛题 100% 对齐**（2.1 全部 15 项必选要求 + 2.2 延迟/带宽指标）。
-- **性能超额达标**：`276,100 < 300,000` cycles。
-- 唯一未闭合的是综合侧的面积/时序报告，属于流程遗留，不影响功能合规性。
-- 原 `.md` 版赛题（根目录 `FlashAttention加器计决划.md`）字符缺失严重，本 PR 新增的 `docs/赛题-FlashAttention-Baseline.md` 从 docx 精确复原，应作为后续参照的唯一 Markdown 来源。
+| 要求 | 结果 |
+|:---|:---|
+| 2.1 全部 15 项必选功能 | **全部达标** — RTL / TB 1:1 映射 |
+| 2.2(1) 主频（Genus） | **100 MHz MET**，slack +1102 ps，隐含 Fmax ≈ 112 MHz |
+| 2.2(2) 面积 ≤ 2M NAND2-eq | **15,847 NAND2（占 0.8 %）** |
+| 2.2(3) 延迟 < 300k cycles | **276,100 cycles** |
+| 2.2(4) 带宽统计 | RD 178 MB/s · WR 59 MB/s · 利用率 3 % |
+| 功能仿真 | Xcelium 24.09.006 @ `sh02lo02` — 24/24 PASS（PR [#4](https://github.com/hy2581/cadence/pull/4)） |
+| 功耗 | Joules vectorless **11.12 mW** @ 100 MHz |
+
+Baseline 已达到赛题二全部 Baseline 必选项，综合/仿真/功耗三侧全部有 Cadence 工具输出的报告佐证。
