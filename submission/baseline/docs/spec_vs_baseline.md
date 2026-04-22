@@ -134,7 +134,25 @@ cd /tmp && rm -rf submission && \
 > | `u_compute` | 854 | `u_dp` 99 + `u_oa` 340 + `u_softmax` 263 |
 > | 其他 | ~460 | buffer/mask/顶层 glue |
 
-### 2.2 综合流程复现
+### 2.2 Fmax 扫描（2026-04-23，部分）
+
+尝试用 `genus_sweep.tcl` + `run_sweep.sh` 在 `sh02lo02` 上扫 10 → 8 → 6 → 5 ns（HIGH effort，`syn_generic/map/opt`）。本 session 只跑完 10 ns 点（已有 run3）与 8 ns 点的 `syn_generic` + PBS 阶段就被手动停掉；下表是 8 ns 点 PBS 阶段（partition-based generic opt）最差分区 slack：
+
+| CLK_PERIOD | 阶段 | 分区 | 最终 Slack | TNS | 判定 |
+|:---|:---|:---:|---:|---:|:---:|
+| 10.0 ns | 完整 (Genus run #3) | whole | **+1102 ps** | 0 | ✅ MET |
+| 8.0 ns | syn_generic → PBS genopt_0 | pbs_genopt_0 | −511.8 ps | 511 | ❌ |
+| 8.0 ns | syn_generic → PBS genopt_2 | **pbs_genopt_2** | **−1717.5 ps** | 658,557 | ❌❌ 关键分区 |
+| 8.0 ns | syn_generic → PBS genopt_1 | pbs_genopt_1 | −901.3 ps | 1,331,145 | ❌ |
+
+**解读**
+- 8 ns 下 PBS `genopt_2` 分区 TNS ≈ 658 ns 负余量，即使后续 `syn_map`/`syn_opt` 继续 HIGH effort 也难抢回 1.7 ns 关键路径；8 ns (125 MHz) 基本不可行。
+- **现有可靠上界**：10 ns MET +1102 ps → Fmax ≈ **1000 ÷ (10 − 1.102) ≈ 112 MHz**。
+- 完整 4 点扫描需要 8+ 小时 HIGH effort，本 session 未跑完；`genus_sweep.tcl`/`run_sweep.sh` 已留仓库里，后续可一键重跑（建议把 effort 降到 `medium` 加速收敛）。
+
+原始日志：`genus_sweep_partial_20260423.log`（63 KB，远端 FILES tab）。
+
+### 2.3 综合流程复现
 
 ```bash
 # 客户端（当前仓库根目录）
