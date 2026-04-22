@@ -87,10 +87,15 @@ class fa_scoreboard extends uvm_scoreboard;
     endfunction
 
     // Compare DUT output with golden
+    // 赛题 2.1(8) 规定: mean_abs_error ≤ 0.03, max_abs_error ≤ 0.10 (折算到浮点域)
     function void check_results();
         real abs_err;
         real total_err = 0;
         int  count = 0;
+        // 赛题阈值 (浮点)
+        real spec_mean_thresh = 0.03;
+        real spec_max_thresh  = 0.10;
+        bit  spec_pass;
 
         max_abs_error = 0;
 
@@ -108,14 +113,29 @@ class fa_scoreboard extends uvm_scoreboard;
         mean_abs_error = total_err / real'(count);
         num_checks = count;
 
+        // 显式打印一行方便日志 grep (格式: SPEC_CHECK | mean=<f> / 0.03 | max=<f> / 0.10 | PASS|FAIL)
+        spec_pass = (mean_abs_error <= spec_mean_thresh) && (max_abs_error <= spec_max_thresh);
+        `uvm_info("SPEC_CHECK", $sformatf(
+            "SPEC_CHECK | mean_abs=%.6f (spec<=%.3f) | max_abs=%.6f (spec<=%.3f) | %s | N=%0d",
+            mean_abs_error, spec_mean_thresh,
+            max_abs_error,  spec_max_thresh,
+            spec_pass ? "PASS" : "FAIL",
+            count), UVM_LOW)
+
         `uvm_info("SCORE", $sformatf(
             "Error stats: mean_abs=%.6f, max_abs=%.6f (over %0d elements)",
             mean_abs_error, max_abs_error, count), UVM_LOW)
 
+        // 宽松的 uvm_error 阈值 — 用来捕获"严重错误"而不是赛题精度边界
+        // 精度边界由 SPEC_CHECK 行记录；这里只在完全跑飞时才让 UVM 标 FAIL
         if (max_abs_error > 1.0)
-            `uvm_error("SCORE", $sformatf("max_abs_error %.6f exceeds threshold", max_abs_error))
+            `uvm_error("SCORE", $sformatf("max_abs_error %.6f exceeds sanity threshold (1.0)", max_abs_error))
+        else if (!spec_pass)
+            `uvm_warning("SCORE", $sformatf(
+                "spec threshold exceeded: mean=%.6f max=%.6f (regression not failed, see SPEC_CHECK)",
+                mean_abs_error, max_abs_error))
         else
-            `uvm_info("SCORE", "PASS: Error within acceptable limits", UVM_LOW)
+            `uvm_info("SCORE", "PASS: Error within spec limits", UVM_LOW)
     endfunction
 
     function void report_phase(uvm_phase phase);

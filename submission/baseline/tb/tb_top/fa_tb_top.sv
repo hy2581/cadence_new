@@ -181,10 +181,20 @@ module fa_tb_top;
 
 
     // Dump waveforms
+    // 1) VCD (兼容 VCS / 其他仿真器)   —— +DUMP_VCD
+    // 2) SHM (Xcelium 原生)            —— +DUMP_SHM [+SHM_PATH=<path>]
     initial begin
         if ($test$plusargs("DUMP_VCD")) begin
             $dumpfile("wave.vcd");
             $dumpvars(0, fa_tb_top);
+        end
+        if ($test$plusargs("DUMP_SHM")) begin
+            string shm_path;
+            if (!$value$plusargs("SHM_PATH=%s", shm_path))
+                shm_path = "waves.shm";
+            $shm_open(shm_path);
+            $shm_probe(fa_tb_top, "AS");
+            $display("[fa_tb_top] SHM dump enabled -> %s (probe: fa_tb_top / AS)", shm_path);
         end
     end
 

@@ -126,6 +126,15 @@ run_test() {
     local tname=$1
     local log="$OUTDIR/log_${tname}.log"
     local cov="$OUTDIR/cov_${tname}"
+    local wave_args=()
+    # 若 WAVE_TEST=<name> 且匹配当前 test，启用 Xcelium 原生 SHM 波形 dump。
+    # tb_top 里 $shm_open / $shm_probe 用 plusargs 触发，无需重编译 (-R 直接生效)。
+    if [[ "${WAVE_TEST:-}" == "$tname" ]]; then
+        local shm="$OUTDIR/waves_${tname}.shm"
+        rm -rf "$shm" || true
+        wave_args=( +DUMP_SHM +SHM_PATH="$shm" )
+        echo "  (waveform dump enabled: $shm)"
+    fi
     echo ""
     echo "------------------------------------------------------------"
     echo "  Running: $tname   ($(date))"
@@ -135,6 +144,7 @@ run_test() {
         +UVM_TESTNAME=$tname \
         +UVM_VERBOSITY=UVM_MEDIUM \
         -coverage all -covoverwrite -covworkdir "$cov" -covtest "$tname" \
+        "${wave_args[@]}" \
         -l "$log" 2>&1 | tail -30
 }
 
