@@ -11,7 +11,8 @@ class fa_scoreboard extends uvm_scoreboard;
     shortint q_data[][];
     shortint k_data[][];
     shortint v_data[][];
-    shortint golden_o[][];
+    shortint golden_o[][];     // Q8.8-quantized reference (兼容旧路径)
+    real     golden_o_fp[][];  // FP64 reference (赛题 2.1(8) 要求: FP32 golden 对比)
     shortint dut_o[][];
 
     // Error statistics
@@ -34,12 +35,14 @@ class fa_scoreboard extends uvm_scoreboard;
         // Allocate
         q_f = new[seq_len]; k_f = new[seq_len]; v_f = new[seq_len];
         s_f = new[seq_len]; p_f = new[seq_len]; o_f = new[seq_len];
-        golden_o = new[seq_len];
+        golden_o    = new[seq_len];
+        golden_o_fp = new[seq_len];
 
         for (int i = 0; i < seq_len; i++) begin
             q_f[i] = new[head_dim]; k_f[i] = new[head_dim]; v_f[i] = new[head_dim];
             s_f[i] = new[seq_len]; p_f[i] = new[seq_len]; o_f[i] = new[head_dim];
-            golden_o[i] = new[head_dim];
+            golden_o[i]    = new[head_dim];
+            golden_o_fp[i] = new[head_dim];
         end
 
         // Q8.8 → float
@@ -79,6 +82,9 @@ class fa_scoreboard extends uvm_scoreboard;
                 o_f[i][j] = 0;
                 for (int k = 0; k < seq_len; k++)
                     o_f[i][j] += p_f[i][k] * v_f[k][j];
+                // FP64 原值保留用于赛题 2.1(8) 精度核对
+                golden_o_fp[i][j] = o_f[i][j];
+                // Q8.8 版本保留用于旧路径/向后兼容
                 golden_o[i][j] = shortint'($rtoi(o_f[i][j] * 256.0));
             end
         end
@@ -99,10 +105,13 @@ class fa_scoreboard extends uvm_scoreboard;
 
         max_abs_error = 0;
 
+        // 赛题 2.1(8) 原文: "与 FP32 golden (同一公式、同一 mask) 对比"。
+        // 这里用 FP64 golden (golden_o_fp) 而非 Q8.8 截断版本 (golden_o) 作为基准,
+        // 否则会把 ~1/256 的量化误差藏进基准里, 产生偏乐观的 PASS。
         for (int i = 0; i < seq_len; i++) begin
             for (int j = 0; j < head_dim; j++) begin
                 real dut_val  = real'(dut_o[i][j]) / 256.0;
-                real gold_val = real'(golden_o[i][j]) / 256.0;
+                real gold_val = golden_o_fp[i][j];
                 abs_err = (dut_val > gold_val) ? (dut_val - gold_val) : (gold_val - dut_val);
                 total_err += abs_err;
                 if (abs_err > max_abs_error) max_abs_error = abs_err;

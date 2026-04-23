@@ -58,12 +58,18 @@ for P in "${PERIODS[@]}"; do
     RC=$?
     echo "  -> exit rc=$RC at ${P}ns" | tee -a "$LOG"
 
-    # 早停条件: 解析 qor，找 TNS < -5ns (5000ps) 或 WNS < -1ns 就跳出
+    # 早停条件: 解析 qor，WNS < -1000 ps (-1 ns) 就跳出 (节省单点 ~6h 综合时间)
     PTAG=$(echo "$P" | tr '.' 'p')
     QOR="$WORK/reports_${PTAG}ns/qor.rpt"
     if [ -f "$QOR" ]; then
         WNS=$(awk '/Critical Path Slack/ {print $(NF-1)}' "$QOR" | head -1)
         echo "  WNS @ ${P}ns: $WNS" | tee -a "$LOG"
+        if [ -n "$WNS" ] && awk "BEGIN{exit !($WNS < -1000)}" 2>/dev/null; then
+            echo "  EARLY STOP: WNS=${WNS}ps < -1000ps at ${P}ns; skipping tighter periods" | tee -a "$LOG"
+            break
+        fi
+    else
+        echo "  WARN: $QOR missing; continuing" | tee -a "$LOG"
     fi
 done
 
