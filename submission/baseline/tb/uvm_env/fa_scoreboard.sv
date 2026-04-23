@@ -105,18 +105,34 @@ class fa_scoreboard extends uvm_scoreboard;
 
         max_abs_error = 0;
 
-        // 赛题 2.1(8) 原文: "与 FP32 golden (同一公式、同一 mask) 对比"。
-        // 这里用 FP64 golden (golden_o_fp) 而非 Q8.8 截断版本 (golden_o) 作为基准,
-        // 否则会把 ~1/256 的量化误差藏进基准里, 产生偏乐观的 PASS。
-        for (int i = 0; i < seq_len; i++) begin
-            for (int j = 0; j < head_dim; j++) begin
-                real dut_val  = real'(dut_o[i][j]) / 256.0;
-                real gold_val = golden_o_fp[i][j];
-                abs_err = (dut_val > gold_val) ? (dut_val - gold_val) : (gold_val - dut_val);
-                total_err += abs_err;
-                if (abs_err > max_abs_error) max_abs_error = abs_err;
-                count++;
+        begin
+            int    max_i = 0, max_j = 0;
+            int    big_err_count = 0;
+            real   max_dut_val  = 0.0;
+            real   max_gold_val = 0.0;
+            // 赛题 2.1(8) 原文: "与 FP32 golden (同一公式、同一 mask) 对比"。
+            // 这里用 FP64 golden (golden_o_fp) 而非 Q8.8 截断版本 (golden_o) 作为基准,
+            // 否则会把 ~1/256 的量化误差藏进基准里, 产生偏乐观的 PASS。
+            for (int i = 0; i < seq_len; i++) begin
+                for (int j = 0; j < head_dim; j++) begin
+                    real dut_val  = real'(dut_o[i][j]) / 256.0;
+                    real gold_val = golden_o_fp[i][j];
+                    abs_err = (dut_val > gold_val) ? (dut_val - gold_val) : (gold_val - dut_val);
+                    total_err += abs_err;
+                    if (abs_err > max_abs_error) begin
+                        max_abs_error = abs_err;
+                        max_i = i; max_j = j;
+                        max_dut_val = dut_val;
+                        max_gold_val = gold_val;
+                    end
+                    if (abs_err > 0.10) big_err_count++;
+                    count++;
+                end
             end
+            `uvm_info("SPEC_CHECK", $sformatf(
+                "SPEC_MAX_AT | i=%0d j=%0d dut=%.6f gold=%.6f err=%.6f | #(err>0.10)=%0d/%0d",
+                max_i, max_j, max_dut_val, max_gold_val, max_abs_error,
+                big_err_count, count), UVM_LOW)
         end
 
         mean_abs_error = total_err / real'(count);
