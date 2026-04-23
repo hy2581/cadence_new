@@ -500,20 +500,33 @@ class Desktop:
         """
         goto_room(page, cfg, dismiss_iframe=False)
         if do_join:
-            # If a remote session needs starting first
-            sr = page.get_by_role("button", name=re.compile("Start remote", re.I))
-            if sr.count():
-                log("starting remote session...")
-                sr.first.click(force=True)
-                # Wait for Join to appear (session boot can take 30-60s)
-                try:
-                    page.wait_for_selector('text=Join', timeout=120000)
-                except PWTimeout:
-                    log("[warn] Join button never appeared after Start remote")
-            join = page.get_by_role("button", name=re.compile("^Join$", re.I))
-            if join.count():
-                join.first.click(force=True)
-                page.wait_for_timeout(2500)
+            # If a remote session needs starting first.
+            # NB: the Cadence portal renders the button text via styled spans, so
+            # page.get_by_role("button", name=...) frequently fails to match even
+            # when the button IS visible. Use Playwright's has-text selector which
+            # falls back on raw text content.
+            # React render can take 3-5s after navigation; wait explicitly.
+            page.wait_for_timeout(5000)
+            sr = page.locator('button:has-text("Start remote")').first
+            try:
+                if sr.count() and sr.is_visible():
+                    log("starting remote session...")
+                    sr.click(force=True)
+                    # Wait for Join to appear (session boot can take 30-60s)
+                    try:
+                        page.wait_for_selector('button:has-text("Join")', timeout=180000)
+                    except PWTimeout:
+                        log("[warn] Join button never appeared after Start remote")
+            except Exception as _e:
+                log(f"[warn] Start remote click skipped: {_e}")
+            join = page.locator('button:has-text("Join")').first
+            try:
+                if join.count() and join.is_visible():
+                    log("joining session...")
+                    join.click(force=True)
+                    page.wait_for_timeout(4000)
+            except Exception as _e:
+                log(f"[warn] Join click skipped: {_e}")
         # Wait for noVNC frame
         deadline = time.time() + wait_canvas_s
         frame = None
@@ -538,21 +551,44 @@ class Desktop:
         stable_for = 0
         while time.time() < deadline:
             page.wait_for_timeout(1500)
-            sample = frame.evaluate(
-                """() => { const c=document.querySelector('canvas'); if(!c) return null;
-                           try {
-                             const ctx=c.getContext('2d');
-                             // sample pixel grid 5x5
-                             const w=c.width, h=c.height;
-                             let s='';
-                             for (let i=1;i<=5;i++) for (let j=1;j<=5;j++) {
-                               const d=ctx.getImageData((w*i/6)|0,(h*j/6)|0,1,1).data;
-                               s += d[0]+','+d[1]+','+d[2]+';';
-                             }
-                             return s;
-                           } catch(e) { return 'err:'+e.message; }
-                         }"""
-            )
+            # Cadence Cloud occasionally detaches/re-attaches the noVNC iframe
+            # during session boot (typically right after Join click). Re-resolve
+            # the frame by URL if the cached handle becomes invalid.
+            try:
+                sample = frame.evaluate(
+                    """() => { const c=document.querySelector('canvas'); if(!c) return null;
+                               try {
+                                 const ctx=c.getContext('2d');
+                                 const w=c.width, h=c.height;
+                                 let s='';
+                                 for (let i=1;i<=5;i++) for (let j=1;j<=5;j++) {
+                                   const d=ctx.getImageData((w*i/6)|0,(h*j/6)|0,1,1).data;
+                                   s += d[0]+','+d[1]+','+d[2]+';';
+                                 }
+                                 return s;
+                               } catch(e) { return 'err:'+e.message; }
+                             }"""
+                )
+            except Exception as _e:
+                log(f"[debug] frame.evaluate failed ({type(_e).__name__}); re-resolving iframe")
+                new_frame = None
+                for _retry in range(10):
+                    for fr in page.frames:
+                        if "/beta-vnc/" in fr.url:
+                            try:
+                                if fr.locator("canvas").count() > 0:
+                                    new_frame = fr; break
+                            except Exception:
+                                pass
+                    if new_frame: break
+                    page.wait_for_timeout(1500)
+                if new_frame:
+                    frame = new_frame
+                    continue
+                else:
+                    # Give it another full paint-wait pass
+                    page.wait_for_timeout(2000)
+                    continue
             if not sample or sample.startswith("err"):
                 continue
             # Blank/white screens have very low pixel diversity
