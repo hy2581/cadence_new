@@ -98,7 +98,16 @@ module online_softmax_unit #(
             wait_cnt       <= '0;
             alpha_feed_row <= '0;
             alpha_recv_row <= '0;
-            for (int r = 0; r < TILE_BR; r++) alpha[r] <= '0;
+            exp_x_in       <= '0;
+            for (int r = 0; r < TILE_BR; r++) begin
+                alpha[r]   <= '0;
+                m_new[r]   <= '0;
+                l_new[r]   <= '0;
+                rescale[r] <= '0;
+            end
+            for (int r = 0; r < TILE_BR; r++)
+                for (int c = 0; c < TILE_BC; c++)
+                    p_matrix[r][c] <= '0;
         end else begin
             done          <= 1'b0;
             results_valid <= 1'b0;

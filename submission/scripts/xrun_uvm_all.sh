@@ -96,6 +96,7 @@ XRUN_COMMON=(
     -timescale 1ns/1ps
     -uvm -uvmhome CDNS-1.2
     +define+SIMULATION
+    ${FA_WB_DBG:++define+FA_WB_DBG}
     -access +rwc
     -assert
     "${INCDIRS[@]}"

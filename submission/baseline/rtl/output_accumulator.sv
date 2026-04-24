@@ -95,8 +95,10 @@ module output_accumulator #(
             norm_col       <= '0;
             for (int r = 0; r < TILE_BR; r++) begin
                 recip_vals[r] <= '0;
-                for (int j = 0; j < HEAD_DIM; j++)
+                for (int j = 0; j < HEAD_DIM; j++) begin
                     o_acc[r][j] <= '0;
+                    o_out[r][j] <= '0;
+                end
             end
         end else begin
             done           <= 1'b0;

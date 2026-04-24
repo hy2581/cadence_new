@@ -88,6 +88,110 @@ module fa_tb_top;
         .irq()
     );
 
+    // ========== AXI Write Probe (FA_WB_DBG) ==========
+    // Counts AXI write handshakes per burst and total bytes written to memory,
+    // and logs every AW channel transaction to localize write-loss bugs.
+`ifdef FA_WB_DBG
+    int wb_total_beats;
+    int wb_total_aw;
+    logic [63:0] wb_last_awaddr;
+    logic [7:0]  wb_last_awlen;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            wb_total_beats  <= 0;
+            wb_total_aw     <= 0;
+            wb_last_awaddr  <= '0;
+            wb_last_awlen   <= '0;
+        end else begin
+            if (mem_if.m_axi_awvalid && mem_if.m_axi_awready) begin
+                wb_total_aw    <= wb_total_aw + 1;
+                wb_last_awaddr <= mem_if.m_axi_awaddr;
+                wb_last_awlen  <= mem_if.m_axi_awlen;
+                $display("[FA_WB_DBG %0t] AW #%0d addr=0x%016h len=%0d",
+                         $time, wb_total_aw + 1, mem_if.m_axi_awaddr, mem_if.m_axi_awlen + 1);
+            end
+            if (mem_if.m_axi_wvalid && mem_if.m_axi_wready) begin
+                wb_total_beats <= wb_total_beats + 1;
+            end
+            if (mem_if.m_axi_bvalid && mem_if.m_axi_bready) begin
+                $display("[FA_WB_DBG %0t] B-resp; total_beats=%0d total_aw=%0d",
+                         $time, wb_total_beats + ((mem_if.m_axi_wvalid && mem_if.m_axi_wready)?1:0),
+                         wb_total_aw);
+            end
+            // 打印 AW 的第一拍写数据 (8 个 16-bit element)，用来判断写数据是否为 0
+            if (mem_if.m_axi_wvalid && mem_if.m_axi_wready && wb_total_aw < 10) begin
+                $display("[FA_WB_DBG %0t] W  aw=%0d beat=%0d wdata[0..3]=%04h %04h %04h %04h",
+                    $time, wb_total_aw, wb_total_beats,
+                    mem_if.m_axi_wdata[15:0], mem_if.m_axi_wdata[31:16],
+                    mem_if.m_axi_wdata[47:32], mem_if.m_axi_wdata[63:48]);
+            end
+        end
+    end
+
+    // Probe softmax completion — print first 3 sm_valid pulses.
+    int smp_count;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) smp_count <= 0;
+        else if (u_dut.u_compute.u_softmax.results_valid && smp_count < 3) begin
+            smp_count <= smp_count + 1;
+            $display("[FA_WB_DBG %0t] SM_VALID #%0d: m_new[0]=%010h l_new[0]=%010h rescale[0]=%010h p_matrix[0][0]=%06h",
+                $time, smp_count + 1,
+                u_dut.u_compute.u_softmax.m_new[0],
+                u_dut.u_compute.u_softmax.l_new[0],
+                u_dut.u_compute.u_softmax.rescale[0],
+                u_dut.u_compute.u_softmax.p_matrix[0][0]);
+        end
+    end
+
+    // Probe compute_core → buffer_system o_wr_en pulse + a few sample values
+    // Use a hierarchical reference into the DUT. Print the first 3 pulses only.
+    int ovp_count;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) ovp_count <= 0;
+        else if (u_dut.comp_o_valid && ovp_count < 3) begin
+            ovp_count <= ovp_count + 1;
+            $display("[FA_WB_DBG %0t] O_VALID pulse #%0d: o_tile[0][0..3]=%04h %04h %04h %04h  o_tile[1][0]=%04h  o_tile[3][63]=%04h",
+                $time, ovp_count + 1,
+                u_dut.comp_o_tile[0][0], u_dut.comp_o_tile[0][1],
+                u_dut.comp_o_tile[0][2], u_dut.comp_o_tile[0][3],
+                u_dut.comp_o_tile[1][0], u_dut.comp_o_tile[3][63]);
+            $display("[FA_WB_DBG %0t]   OA: l_new[0..3]=%010h %010h %010h %010h",
+                $time,
+                u_dut.u_compute.l_new[0],
+                u_dut.u_compute.l_new[1],
+                u_dut.u_compute.l_new[2],
+                u_dut.u_compute.l_new[3]);
+            $display("[FA_WB_DBG %0t]   OA: recip_vals[0..3]=%010h %010h %010h %010h",
+                $time,
+                u_dut.u_compute.u_oa.recip_vals[0],
+                u_dut.u_compute.u_oa.recip_vals[1],
+                u_dut.u_compute.u_oa.recip_vals[2],
+                u_dut.u_compute.u_oa.recip_vals[3]);
+            $display("[FA_WB_DBG %0t]   OA: o_acc[0][0..3]=%010h %010h %010h %010h  o_acc[1][0]=%010h",
+                $time,
+                u_dut.u_compute.u_oa.o_acc[0][0],
+                u_dut.u_compute.u_oa.o_acc[0][1],
+                u_dut.u_compute.u_oa.o_acc[0][2],
+                u_dut.u_compute.u_oa.o_acc[0][3],
+                u_dut.u_compute.u_oa.o_acc[1][0]);
+            $display("[FA_WB_DBG %0t]   OSX: m_new[0..3]=%010h %010h %010h %010h",
+                $time,
+                u_dut.u_compute.m_new[0],
+                u_dut.u_compute.m_new[1],
+                u_dut.u_compute.m_new[2],
+                u_dut.u_compute.m_new[3]);
+            $display("[FA_WB_DBG %0t]   STATES: oa.state=%0d  sm.state=%0d  cc.state=%0d  m_old[0]=%010h l_old[0]=%010h",
+                $time,
+                u_dut.u_compute.u_oa.state,
+                u_dut.u_compute.u_softmax.state,
+                u_dut.u_compute.state,
+                u_dut.u_compute.m_old[0],
+                u_dut.u_compute.l_old[0]);
+        end
+    end
+`endif
+
     // ========== Protocol Checkers ==========
 `ifdef ENABLE_PROTOCOL_CHECK
     axi4_lite_protocol_checker #(

@@ -57,9 +57,12 @@ module dot_product_array #(
             scores_valid <= 1'b0;
             done         <= 1'b0;
             busy         <= 1'b0;
-            for (int r = 0; r < TILE_BR; r++)
-                for (int c = 0; c < TILE_BC; c++)
-                    acc[r][c] <= '0;
+            for (int r = 0; r < TILE_BR; r++) begin
+                for (int c = 0; c < TILE_BC; c++) begin
+                    acc[r][c]    <= '0;
+                    scores[r][c] <= '0;
+                end
+            end
         end else begin
             scores_valid <= 1'b0;
             done         <= 1'b0;

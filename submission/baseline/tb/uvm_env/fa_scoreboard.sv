@@ -135,6 +135,31 @@ class fa_scoreboard extends uvm_scoreboard;
                 big_err_count, count), UVM_LOW)
         end
 
+        // 新增: 统计每个 Q-tile (4 连续行为一组) 的全零行数,
+        // 用于定位哪个 tile 的 writeback 丢了.
+        begin
+            int zero_rows_total = 0;
+            int tile_bytes = 0;
+            int tile_br_local = 4;
+            string zero_tiles_str = "";
+            for (int qt = 0; qt < seq_len / tile_br_local; qt++) begin
+                int tile_nonzero = 0;
+                for (int r = 0; r < tile_br_local; r++) begin
+                    int row_nonzero = 0;
+                    for (int j = 0; j < head_dim; j++)
+                        if (dut_o[qt*tile_br_local + r][j] != 0) row_nonzero++;
+                    if (row_nonzero == 0) zero_rows_total++;
+                    tile_nonzero += row_nonzero;
+                end
+                if (tile_nonzero == 0) begin
+                    zero_tiles_str = {zero_tiles_str, $sformatf(" %0d", qt)};
+                end
+            end
+            `uvm_info("SPEC_CHECK", $sformatf(
+                "SPEC_ZERO | zero_rows=%0d/%0d | zero_tiles:%s",
+                zero_rows_total, seq_len, zero_tiles_str), UVM_LOW)
+        end
+
         mean_abs_error = total_err / real'(count);
         num_checks = count;
 

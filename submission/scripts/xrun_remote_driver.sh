@@ -49,8 +49,12 @@ xrun -version | head -5 || true
 # ENV overrides:
 #   WAVE_TEST=<name>       → 在 <name> 上启用 SHM 波形 dump
 cd "$(dirname "$0")/.."
-echo "[xrun-driver] cwd=$(pwd)  wave='${WAVE_TEST:-}'"
-WAVE_TEST="${WAVE_TEST:-}" bash scripts/xrun_uvm_all.sh 2>&1 | tee "$OUTDIR/xrun_all.log"
+echo "[xrun-driver] cwd=$(pwd)  wave='${WAVE_TEST:-}'  only='${DBG_ONLY_TEST:-}'  fa_wb_dbg='${FA_WB_DBG:-}'"
+if [[ -n "${DBG_ONLY_TEST:-}" ]]; then
+    WAVE_TEST="${WAVE_TEST:-}" FA_WB_DBG="${FA_WB_DBG:-}" bash scripts/xrun_uvm_all.sh "$DBG_ONLY_TEST" 2>&1 | tee "$OUTDIR/xrun_all.log"
+else
+    WAVE_TEST="${WAVE_TEST:-}" FA_WB_DBG="${FA_WB_DBG:-}" bash scripts/xrun_uvm_all.sh 2>&1 | tee "$OUTDIR/xrun_all.log"
+fi
 XRUN_RC=${PIPESTATUS[0]}
 echo "[xrun-driver] xrun_uvm_all.sh rc=$XRUN_RC"
 
