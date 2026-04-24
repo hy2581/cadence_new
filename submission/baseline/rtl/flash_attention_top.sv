@@ -189,9 +189,9 @@ module flash_attention_top (
         .v_buf_sel(tc_kv_buf_sel),
         .q_rd_en(comp_q_rd_en), .q_rd_step(comp_q_step), .q_rd_data(comp_q_data),
         .k_rd_en(comp_k_rd_en), .k_rd_step(comp_k_step),
-        .k_rd_buf_sel(~tc_kv_buf_sel), .k_rd_data(comp_k_data),
+        .k_rd_buf_sel(tc_kv_buf_sel), .k_rd_data(comp_k_data),
         .v_rd_en(comp_v_rd_en), .v_rd_step(comp_v_step),
-        .v_rd_buf_sel(~tc_kv_buf_sel), .v_rd_data(comp_v_data),
+        .v_rd_buf_sel(tc_kv_buf_sel), .v_rd_data(comp_v_data),
         .o_wr_en(comp_o_valid), .o_wr_data(comp_o_tile),
         .o_rd_en(buf_o_rd_en), .o_rd_row(buf_o_rd_row),
         .o_rd_col_grp(buf_o_rd_col_grp), .o_rd_data(buf_o_rd_data)

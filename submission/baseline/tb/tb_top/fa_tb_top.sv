@@ -129,6 +129,94 @@ module fa_tb_top;
         end
     end
 
+    // Probe buffer_system write activity + dp_start/dp_done snapshots
+    int q_wr_cnt, k_wr_cnt, v_wr_cnt;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            q_wr_cnt <= 0; k_wr_cnt <= 0; v_wr_cnt <= 0;
+        end else begin
+            if (u_dut.u_buffers.q_wr_en) begin
+                q_wr_cnt <= q_wr_cnt + 1;
+                if (q_wr_cnt < 4)
+                    $display("[FA_WB_DBG %0t] Q_WR #%0d addr=%0d wdata[0..3]=%04h %04h %04h %04h",
+                        $time, q_wr_cnt + 1, u_dut.u_buffers.q_wr_addr,
+                        u_dut.u_buffers.q_wr_data[15:0],
+                        u_dut.u_buffers.q_wr_data[31:16],
+                        u_dut.u_buffers.q_wr_data[47:32],
+                        u_dut.u_buffers.q_wr_data[63:48]);
+            end
+            if (u_dut.u_buffers.k_wr_en) begin
+                k_wr_cnt <= k_wr_cnt + 1;
+                if (k_wr_cnt < 4)
+                    $display("[FA_WB_DBG %0t] K_WR #%0d buf=%0d addr=%0d wdata[0..3]=%04h %04h %04h %04h",
+                        $time, k_wr_cnt + 1, u_dut.u_buffers.k_buf_sel, u_dut.u_buffers.k_wr_addr,
+                        u_dut.u_buffers.k_wr_data[15:0],
+                        u_dut.u_buffers.k_wr_data[31:16],
+                        u_dut.u_buffers.k_wr_data[47:32],
+                        u_dut.u_buffers.k_wr_data[63:48]);
+            end
+            if (u_dut.u_buffers.v_wr_en) v_wr_cnt <= v_wr_cnt + 1;
+        end
+    end
+
+    // Probe at first dp_start: dump q_mem / k_mem sample addresses
+    int dp_start_cnt;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) dp_start_cnt <= 0;
+        else if (u_dut.u_compute.dp_start && dp_start_cnt < 2) begin
+            dp_start_cnt <= dp_start_cnt + 1;
+            $display("[FA_WB_DBG %0t] DP_START #%0d: q_wr_total=%0d k_wr_total=%0d v_wr_total=%0d",
+                $time, dp_start_cnt + 1, q_wr_cnt, k_wr_cnt, v_wr_cnt);
+            $display("[FA_WB_DBG %0t]   q_mem[0..7]=%04h %04h %04h %04h %04h %04h %04h %04h",
+                $time,
+                u_dut.u_buffers.q_mem[0], u_dut.u_buffers.q_mem[1],
+                u_dut.u_buffers.q_mem[2], u_dut.u_buffers.q_mem[3],
+                u_dut.u_buffers.q_mem[4], u_dut.u_buffers.q_mem[5],
+                u_dut.u_buffers.q_mem[6], u_dut.u_buffers.q_mem[7]);
+            $display("[FA_WB_DBG %0t]   q_mem[63 64 127 128 191 192 255]=%04h %04h %04h %04h %04h %04h %04h",
+                $time,
+                u_dut.u_buffers.q_mem[63], u_dut.u_buffers.q_mem[64],
+                u_dut.u_buffers.q_mem[127], u_dut.u_buffers.q_mem[128],
+                u_dut.u_buffers.q_mem[191], u_dut.u_buffers.q_mem[192],
+                u_dut.u_buffers.q_mem[255]);
+            $display("[FA_WB_DBG %0t]   k_mem[0][0..3]=%04h %04h %04h %04h  k_mem[0][1023]=%04h  k_mem[1][0]=%04h",
+                $time,
+                u_dut.u_buffers.k_mem[0][0], u_dut.u_buffers.k_mem[0][1],
+                u_dut.u_buffers.k_mem[0][2], u_dut.u_buffers.k_mem[0][3],
+                u_dut.u_buffers.k_mem[0][1023], u_dut.u_buffers.k_mem[1][0]);
+        end
+    end
+
+    // Probe dp data_valid cycles — first 3 cycles of dot product stream
+    int dpv_cnt;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) dpv_cnt <= 0;
+        else if (u_dut.u_compute.dp_data_valid && dpv_cnt < 3) begin
+            dpv_cnt <= dpv_cnt + 1;
+            $display("[FA_WB_DBG %0t] DP_DATAV #%0d: q_rd_step=%0d k_rd_step=%0d q_data[0][0..3]=%04h %04h %04h %04h k_data[0][0..3]=%04h %04h %04h %04h",
+                $time, dpv_cnt + 1,
+                u_dut.u_compute.q_rd_step, u_dut.u_compute.k_rd_step,
+                u_dut.u_compute.q_data[0][0], u_dut.u_compute.q_data[0][1],
+                u_dut.u_compute.q_data[0][2], u_dut.u_compute.q_data[0][3],
+                u_dut.u_compute.k_data[0][0], u_dut.u_compute.k_data[0][1],
+                u_dut.u_compute.k_data[0][2], u_dut.u_compute.k_data[0][3]);
+        end
+    end
+
+    // Probe dp_done — dump dp_scores samples
+    int dpd_cnt;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) dpd_cnt <= 0;
+        else if (u_dut.u_compute.dp_done && dpd_cnt < 2) begin
+            dpd_cnt <= dpd_cnt + 1;
+            $display("[FA_WB_DBG %0t] DP_DONE #%0d: dp_scores[0][0..3]=%010h %010h %010h %010h  dp_scores[3][15]=%010h",
+                $time, dpd_cnt + 1,
+                u_dut.u_compute.dp_scores[0][0], u_dut.u_compute.dp_scores[0][1],
+                u_dut.u_compute.dp_scores[0][2], u_dut.u_compute.dp_scores[0][3],
+                u_dut.u_compute.dp_scores[3][15]);
+        end
+    end
+
     // Probe softmax completion — print first 3 sm_valid pulses.
     int smp_count;
     always_ff @(posedge clk or negedge rst_n) begin
