@@ -129,6 +129,31 @@ module fa_tb_top;
         end
     end
 
+    // AXI-level diagnostics: count ARVALID handshakes and RVALID beats
+    // to localize where K DMA truncates (master / mem_agent / dma_engine).
+    int axi_ar_cnt, axi_r_cnt;
+    int axi_ar_arlen_last;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            axi_ar_cnt <= 0; axi_r_cnt <= 0; axi_ar_arlen_last <= 0;
+        end else begin
+            if (mem_if.m_axi_arvalid && mem_if.m_axi_arready) begin
+                axi_ar_cnt <= axi_ar_cnt + 1;
+                axi_ar_arlen_last <= mem_if.m_axi_arlen;
+                $display("[FA_WB_DBG %0t] AXI_AR #%0d addr=%016h arlen=%0d (=%0d beats) arsize=%0d",
+                    $time, axi_ar_cnt + 1,
+                    mem_if.m_axi_araddr, mem_if.m_axi_arlen, mem_if.m_axi_arlen + 1,
+                    mem_if.m_axi_arsize);
+            end
+            if (mem_if.m_axi_rvalid && mem_if.m_axi_rready) begin
+                axi_r_cnt <= axi_r_cnt + 1;
+                if (mem_if.m_axi_rlast)
+                    $display("[FA_WB_DBG %0t] AXI_R_LAST total_r=%0d (this burst ended)",
+                        $time, axi_r_cnt + 1);
+            end
+        end
+    end
+
     // Probe buffer_system write activity + dp_start/dp_done snapshots
     int q_wr_cnt, k_wr_cnt, v_wr_cnt;
     always_ff @(posedge clk or negedge rst_n) begin
