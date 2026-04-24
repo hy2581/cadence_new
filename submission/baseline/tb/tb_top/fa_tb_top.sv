@@ -217,14 +217,49 @@ module fa_tb_top;
         end
     end
 
-    // Probe softmax completion — print first 3 sm_valid pulses.
-    int smp_count;
+    // Probe Q-tile transitions — capture compute_core start on each Q-tile
+    int qtile_start_cnt;
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) smp_count <= 0;
-        else if (u_dut.u_compute.u_softmax.results_valid && smp_count < 3) begin
+        if (!rst_n) qtile_start_cnt <= 0;
+        else if (u_dut.u_compute.start && u_dut.u_compute.first_kv_tile && qtile_start_cnt < 4) begin
+            qtile_start_cnt <= qtile_start_cnt + 1;
+            $display("[FA_WB_DBG %0t] QTILE_START #%0d (first_kv): cc.state=%0d m_old[0]=%010h l_old[0]=%010h q_tile_idx=%0d kv_buf_sel=%0d",
+                $time, qtile_start_cnt + 1,
+                u_dut.u_compute.state,
+                u_dut.u_compute.m_old[0],
+                u_dut.u_compute.l_old[0],
+                u_dut.u_compute.q_tile_idx,
+                u_dut.u_tile_ctrl.kv_buf_sel);
+        end
+    end
+
+    // Probe softmax completion — print first sm_valid in each of first 4 Q-tiles.
+    int smp_count;
+    int smp_last_q;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin smp_count <= 0; smp_last_q <= -1; end
+        else if (u_dut.u_compute.u_softmax.results_valid &&
+                 u_dut.u_compute.q_tile_idx != smp_last_q && smp_count < 4) begin
+            smp_last_q <= u_dut.u_compute.q_tile_idx;
             smp_count <= smp_count + 1;
+            $display("[FA_WB_DBG %0t] SM_VALID_Q%0d: m_new[0]=%010h l_new[0]=%010h rescale[0]=%010h p_matrix[0][0]=%06h first_tile=%0d",
+                $time, u_dut.u_compute.q_tile_idx,
+                u_dut.u_compute.u_softmax.m_new[0],
+                u_dut.u_compute.u_softmax.l_new[0],
+                u_dut.u_compute.u_softmax.rescale[0],
+                u_dut.u_compute.u_softmax.p_matrix[0][0],
+                u_dut.u_compute.first_kv_tile);
+        end
+    end
+
+    // Also print original first-3 sm_valid (covers multi-KV-tile sequence in Q-tile 0)
+    int smp_count_kv;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) smp_count_kv <= 0;
+        else if (u_dut.u_compute.u_softmax.results_valid && smp_count_kv < 3) begin
+            smp_count_kv <= smp_count_kv + 1;
             $display("[FA_WB_DBG %0t] SM_VALID #%0d: m_new[0]=%010h l_new[0]=%010h rescale[0]=%010h p_matrix[0][0]=%06h",
-                $time, smp_count + 1,
+                $time, smp_count_kv + 1,
                 u_dut.u_compute.u_softmax.m_new[0],
                 u_dut.u_compute.u_softmax.l_new[0],
                 u_dut.u_compute.u_softmax.rescale[0],
