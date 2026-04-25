@@ -2,8 +2,8 @@
 
 ## 验证环境
 
-- **工具**: VCS L-2016.06_Full64
-- **容器**: synopsys_fa (synopsys2016:0.0.0)
+- **工具**: VCS X-2025.06 / Design Compiler X-2025.06-SP4
+- **环境**: native Synopsys 2025 server flow, no Docker container required
 - **服务器**: ubuntu@117.50.81.212 (16核, 62GB RAM)
 - **仿真时间**: 3.040秒 CPU时间
 

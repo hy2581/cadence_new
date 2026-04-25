@@ -1,85 +1,85 @@
-# Synopsys 2016 Docker 环境配置指南
+# Synopsys 2025 setup
 
-## 服务器信息
-
-- **服务器**: ubuntu@117.50.81.212
-- **Docker镜像**: synopsys2016:0.0.0 (16.5GB)
-- **工具链**: VCS L-2016.06, DC L-2016.03-SP1, Verdi L-2016.06-1, PT M-2016.12-SP1, ICC L-2016.03-SP1
-
-## 创建容器
-
-### 前提条件
-
-需要一个已运行的容器（`synopsys`）提供License服务：
+This project is configured for the Synopsys 2025 installation on the remote
+server reached with:
 
 ```bash
-# 基础容器（提供License服务）- 已存在
-docker run -d --name synopsys \
-  --hostname lizhen \
-  --entrypoint "" \
-  --pid=host \
-  --security-opt seccomp=unconfined \
-  --security-opt label=disable \
-  -v /home/ubuntu/workspace:/workspace \
-  -v /proc:/host_proc:ro \
-  synopsys2016:0.0.0 \
-  /bin/bash -c '/usr/synopsys/11.9/amd64/bin/lmgrd -c /usr/local/flexlm/licenses/license.dat; sleep infinity'
+ssh -p 56557 hy258@frp-dog.com
 ```
 
-### 创建新的工作容器
+The expected tool locations are:
 
 ```bash
-docker run -d --name synopsys_fa \
-  --entrypoint "" \
-  --pid=host \
-  --network=container:synopsys \
-  --security-opt seccomp=unconfined \
-  --security-opt label=disable \
-  -v /home/ubuntu/fa_project:/workspace \
-  -v /proc:/host_proc:ro \
-  synopsys2016:0.0.0 \
-  /bin/bash -c 'sleep infinity'
+VCS_HOME=/eda/synopsys2025/vcs/X-2025.06
+SYNOPSYS=/eda/synopsys2025/syn/X-2025.06-SP4
+SNPSLMD_LICENSE_FILE=/eda/license/Synopsys.dat
+LM_LICENSE_FILE=/eda/license/Synopsys.dat
+TSMCHOME=~/lib_new/TSMCHOME
 ```
 
-### 关键Docker参数说明
+The helper script `scripts/synopsys2025_env.sh` sets these defaults when the
+paths exist, and leaves user-provided overrides untouched.
 
-| 参数 | 说明 |
-|------|------|
-| `--pid=host` | 共享宿主机PID namespace，解决VCS get_proc_stat SIGSEGV |
-| `--network=container:synopsys` | 共享License容器的网络，访问27000@lizhen |
-| `--security-opt seccomp=unconfined` | 禁用seccomp，避免VCS系统调用被拦截 |
-| `--entrypoint ""` | 覆盖镜像内置的entrypoint |
+The TSMC 12nm library defaults are in `scripts/tsmc12_env.sh`. On the remote
+server it selects this slow-corner target library by default:
 
-## VCS编译
+```text
+~/lib_new/TSMCHOME/digital/Front_End/timing_power_noise/NLDM/tcbn12ffcllbwp6t16p96cpd_120a/tcbn12ffcllbwp6t16p96cpdssgnp0p72v125c.db
+```
 
-### 环境变量
+Use another corner by overriding `TSMC12_CORNER` or `DC_TARGET_LIB`, for example:
 
 ```bash
-export SNPSLMD_LICENSE_FILE=27000@lizhen
-export VCS_HOME=/usr/synopsys/vcs-L-2016.06
+TSMC12_CORNER=tt0p8v25c bash scripts/run_dc.sh
+DC_TARGET_LIB=/path/to/other_corner.db bash scripts/run_dc.sh
 ```
 
-### 编译命令（关键LDFLAGS）
+## VCS system test
 
 ```bash
-vcs -full64 -sverilog \
-    +incdir+rtl/include \
-    +define+SIMULATION \
-    -timescale=1ns/1ps \
-    -LDFLAGS "-Wl,--no-as-needed -Wl,--unresolved-symbols=ignore-in-shared-libs" \
-    <source files> \
-    -o simv_system
+cd ~/cadence_new
+source scripts/synopsys2025_env.sh
+bash scripts/run_system_tb.sh
 ```
 
-**`-LDFLAGS` 说明**：
-- `-Wl,--no-as-needed`: 强制链接所有.so，解决libsnpsmalloc.so符号缺失
-- `-Wl,--unresolved-symbols=ignore-in-shared-libs`: 忽略共享库间未解析符号
+Outputs are written to:
 
-## 已验证的仿真结果
-
+```text
+build/vcs_system_tb/compile.log
+build/vcs_system_tb/sim.log
 ```
-Cycles:         276100  (PASS, < 300k)
-mean_abs_error: 0.013350 (PASS)
-max_abs_error:  0.238281 (PASS)
->>> ALL TESTS PASSED <<<
+
+To run in the background:
+
+```bash
+nohup bash scripts/run_system_tb.sh > build/vcs_system_tb.nohup.log 2>&1 &
+```
+
+## Design Compiler synthesis
+
+The default flow uses the TSMC 12nm `.db` discovered under `TSMCHOME`:
+
+```bash
+cd ~/cadence_new
+source scripts/synopsys2025_env.sh
+source scripts/tsmc12_env.sh
+bash scripts/run_dc.sh
+```
+
+If no TSMC12 library is found, `scripts/run_dc.tcl` falls back to Synopsys
+sample libraries such as `class.db`. That mode is useful for checking the DC
+2025 flow, but its reports are not valid final QoR data.
+
+Outputs are written to:
+
+```text
+build/dc/dc_shell.log
+build/dc/reports/
+build/dc/netlist/
+```
+
+To run in the background:
+
+```bash
+nohup bash scripts/run_dc.sh > build/dc.nohup.log 2>&1 &
 ```

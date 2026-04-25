@@ -1,0 +1,6 @@
+*.sh text eol=lf
+*.tcl text eol=lf
+*.sdc text eol=lf
+*.sv text eol=lf
+*.svh text eol=lf
+*.md text eol=lf

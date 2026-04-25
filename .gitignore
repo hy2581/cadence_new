@@ -1,0 +1,15 @@
+/build/
+/work_dc/
+/reports/
+/netlist/
+/csrc/
+/DVEfiles/
+/simv
+/simv.daidir/
+/simv_system
+/simv_system.daidir/
+/*.log
+/ucli.key
+/inter.vpd
+/novas.*
+/default.svf
