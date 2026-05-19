@@ -6,7 +6,11 @@
 // ============================================================
 
 // --- Baseline fixed dimensions ---
+`ifdef FA_SEQ_LEN_OVERRIDE
+parameter SEQ_LEN       = `FA_SEQ_LEN_OVERRIDE;
+`else
 parameter SEQ_LEN       = 256;
+`endif
 parameter HEAD_DIM      = 64;
 
 // --- Tiling parameters ---
@@ -56,6 +60,10 @@ parameter REG_VALID_LEN    = 8'h4C;
 parameter REG_HEAD_COUNT   = 8'h50;
 parameter REG_HEAD_STRIDE  = 8'h54;
 parameter REG_QUEUE_STATUS = 8'h58;
+parameter REG_FORMAT       = 8'h5C;
+parameter REG_DROPOUT_CTRL = 8'h60;
+parameter REG_DROPOUT_RATE = 8'h64;
+parameter REG_DROPOUT_SEED = 8'h68;
 
 // --- CTRL register bits ---
 parameter CTRL_START      = 0;
@@ -69,6 +77,17 @@ parameter STATUS_ERROR    = 2;
 
 // --- CFG register bits ---
 parameter CFG_CAUSAL_EN   = 0;
+
+// --- External data format modes ---
+// All modes use the existing 16-bit tensor lane spacing. INT8/FP8 use the
+// lower byte of each lane; the internal compute path remains Q8.8.
+parameter FORMAT_Q8_8      = 3'd0;
+parameter FORMAT_Q6_10     = 3'd1;
+parameter FORMAT_Q4_12     = 3'd2;
+parameter FORMAT_INT8_Q4_4 = 3'd3;
+parameter FORMAT_FP8_E4M3  = 3'd4;
+parameter FORMAT_FP16      = 3'd5;
+parameter FORMAT_BF16      = 3'd6;
 
 // --- Default values ---
 parameter DEFAULT_STRIDE  = HEAD_DIM * 2;           // d * sizeof(Q8.8)

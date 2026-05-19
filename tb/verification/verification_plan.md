@@ -21,6 +21,12 @@ verification environment for contest problem 2.
 | UVM bonus: padding mask | Runtime valid length masks padded Q/K/V rows and checks padded O rows stay zero | `VALID_LEN` register, tile bounds, compute mask, `fa_uvm_padding_mask_test` | `rtl/*.sv`, `tb/uvm/fa_uvm_pkg.sv`, `scripts/run_uvm_bonus.sh` |
 | UVM bonus: multi-head | Sequential heads with runtime head count and head stride | `HEAD_COUNT`, `HEAD_STRIDE`, tile-controller head loop, `fa_uvm_multi_head_test` | `rtl/*.sv`, `tb/uvm/fa_uvm_pkg.sv`, `scripts/run_uvm_bonus.sh` |
 | UVM bonus: task queue | At least two attention jobs captured from AXI4-Lite and executed back-to-back | Active-job capture, two-entry pending queue, `QUEUE_STATUS`, `fa_uvm_task_queue_test` | `rtl/flash_attention_top.sv`, `tb/uvm/fa_uvm_pkg.sv`, `scripts/run_uvm_bonus.sh` |
+| UVM bonus: BF16/FP16 I/O | Externally visible BF16 and FP16 tensor formats with deterministic conversion to/from the internal accelerator datapath | `REG_FORMAT`, buffer load/store adapters, format-aware golden model, `fa_uvm_bf16_fp16_test` | `rtl/buffer_system.sv`, `tb/uvm/fa_uvm_pkg.sv`, `scripts/run_uvm_bonus.sh` |
+| UVM bonus: Q6.10/Q4.12 I/O | Additional fixed-point tensor formats with deterministic conversion | `REG_FORMAT`, Q6.10/Q4.12 adapters, `fa_uvm_fixed_format_test` | `rtl/buffer_system.sv`, `tb/uvm/fa_uvm_pkg.sv`, `scripts/run_uvm_bonus.sh` |
+| UVM bonus: INT8/FP8 I/O | Lower precision external tensor encodings, including FP8 E4M3 | `REG_FORMAT`, lane-aligned INT8 Q4.4 and FP8 E4M3 adapters, `fa_uvm_int8_fp8_test` | `rtl/buffer_system.sv`, `tb/uvm/fa_uvm_pkg.sv`, `scripts/run_uvm_bonus.sh` |
+| UVM bonus: dropout | Deterministic training-style dropout applied to attention probabilities with seed/rate control | `DROPOUT_CTRL`, `DROPOUT_RATE`, `DROPOUT_SEED`, output-accumulator dropout, `fa_uvm_dropout_test` | `rtl/output_accumulator.sv`, `tb/uvm/fa_uvm_pkg.sv`, `scripts/run_uvm_bonus.sh` |
+| UVM bonus: SEQ_LEN=512 | Compile-time S=512 variant with UVM output comparison beyond row 255 | `FA_SEQ_LEN_OVERRIDE`, dynamic UVM tensor sizing, `fa_uvm_seq512_test` | `rtl/include/fa_params.svh`, `tb/uvm/fa_uvm_pkg.sv`, `scripts/run_uvm_bonus_full.sh` |
+| UVM bonus: AXI4-Stream | Ready/valid stream data movement with scoreboard-visible transfers | `axis_stream_bridge`, `fa_axis_if`, AXIS monitor/scoreboard, `fa_uvm_axis_smoke_test` | `rtl/axis_stream_bridge.sv`, `tb/uvm/fa_uvm_if.sv`, `tb/uvm/fa_uvm_pkg.sv` |
 | Coverage | VCS line/cond/fsm/tgl/branch coverage and functional coverage for register access, start/done, causal, DMA, AXI burst/handshake, performance and error buckets | Coverage-enabled verification script and covergroups | `scripts/run_verification_suite.sh`, `tb/verification/fa_verification_tb.sv` |
 | UVM coverage | Functional covergroups for register map, start/done flow, DMA regions, AXI burst characteristics, causal/performance buckets, and error-free completion | `fa_uvm_coverage`; code coverage through UVM runner | `scripts/run_uvm_verification.sh`, `tb/uvm/fa_uvm_pkg.sv` |
 
@@ -31,15 +37,15 @@ It reuses the RTL and the existing `axi4_slave_mem` model, but stimulus,
 checking, and coverage are UVM components/classes rather than a module-only
 wrapper.
 
-- Interfaces: `fa_axil_if`, `fa_axi4_master_if`, `fa_mem_access_if`.
-- Sequence items: `fa_axil_reg_item`, `fa_attention_job_item`, `fa_axi_dma_item`.
-- Sequences: `fa_uvm_reg_sequence`, `fa_uvm_attention_job_sequence`, `fa_uvm_causal_e2e_sequence`, `fa_uvm_bonus_job_sequence`, and `fa_uvm_task_queue_sequence`.
+- Interfaces: `fa_axil_if`, `fa_axi4_master_if`, `fa_mem_access_if`, `fa_axis_if`.
+- Sequence items: `fa_axil_reg_item`, `fa_attention_job_item`, `fa_axi_dma_item`, `fa_axis_item`.
+- Sequences: `fa_uvm_reg_sequence`, `fa_uvm_attention_job_sequence`, `fa_uvm_causal_e2e_sequence`, `fa_uvm_bonus_job_sequence`, `fa_uvm_task_queue_sequence`, and AXIS smoke stimulus.
 - Agents: active `fa_axil_agent`; passive `fa_axi_dma_agent`.
 - Driver: `fa_axil_driver` for AXI4-Lite register reads/writes.
 - Monitors/checkers: `fa_axil_monitor` and `fa_axi_master_monitor`, implementing local UVM VIP-lite protocol checks.
 - Scoreboard: `fa_uvm_scoreboard`, including FP32 golden model reuse, DMA byte/range checking, counter checks, performance check, and output comparison.
 - Coverage: `fa_uvm_coverage`, with register, flow, DMA, AXI burst, performance, and error-free completion covergroups.
-- Environment/tests: `fa_uvm_env`, `fa_uvm_base_test`, `fa_uvm_causal_e2e_test`, `fa_uvm_smoke_test`, `fa_uvm_padding_mask_test`, `fa_uvm_multi_head_test`, and `fa_uvm_task_queue_test`.
+- Environment/tests: `fa_uvm_env`, `fa_uvm_base_test`, `fa_uvm_causal_e2e_test`, `fa_uvm_smoke_test`, `fa_uvm_padding_mask_test`, `fa_uvm_multi_head_test`, `fa_uvm_task_queue_test`, `fa_uvm_bf16_fp16_test`, `fa_uvm_fixed_format_test`, `fa_uvm_int8_fp8_test`, `fa_uvm_dropout_test`, `fa_uvm_seq512_test`, and `fa_uvm_axis_smoke_test`.
 
 The UVM AXI protocol checks are local VIP-lite style checks and do not require
 commercial AXI VIP. They check valid-ready payload stability, X/Z-free valid
@@ -55,32 +61,32 @@ Latest passing UVM evidence:
 
 Latest passing UVM bonus evidence:
 
-- Command: `VCS_BONUS_BUILD_ROOT=remote_codex_jobs/bonus_uvm_completion_20260520_010220/artifacts/vcs_uvm_bonus_retry VCS_ENABLE_COVERAGE=0 UVM_BONUS_TESTS="fa_uvm_multi_head_test fa_uvm_task_queue_test" bash scripts/run_uvm_bonus.sh`
-- Padding log: `remote_codex_jobs/bonus_uvm_completion_20260520_010220/artifacts/vcs_uvm_bonus/fa_uvm_padding_mask_test/sim.log`
-- Multi-head log: `remote_codex_jobs/bonus_uvm_completion_20260520_010220/artifacts/vcs_uvm_bonus_retry/fa_uvm_multi_head_test/sim.log`
-- Task-queue log: `remote_codex_jobs/bonus_uvm_completion_20260520_010220/artifacts/vcs_uvm_bonus_retry/fa_uvm_task_queue_test/sim.log`
-- Results: padding `VALID_LEN=130`, `cycles=88129`, `RD_BYTES=643584`, `WR_BYTES=16896`; multi-head `HEAD_COUNT=2`, `cycles=599489`, `RD_BYTES=4521984`, `WR_BYTES=65536`; queue two jobs, `QUEUE_STATUS=0x00000200`, aggregate DMA read/write `344064/16384`; all with UVM warnings/errors/fatals `0/0/0`.
+- Run directory: `remote_codex_jobs/bonus_full_uvm_20260520_013839`.
+- Script syntax: `bash -n scripts/run_uvm_verification.sh scripts/run_uvm_bonus.sh scripts/run_uvm_bonus_full.sh scripts/run_system_tb.sh`.
+- Full bonus suite: `remote_codex_jobs/bonus_full_uvm_20260520_013839/artifacts/vcs_uvm_bonus_full_final/*/sim.log`, covering baseline UVM, padding, multi-head, task queue, BF16/FP16, Q6.10/Q4.12, INT8 Q4.4, FP8 E4M3, deterministic dropout, AXI4-Stream smoke, and the compile-time S=512 bounded variant.
+- Every final bonus-suite log reports UVM warnings/errors/fatals `0/0/0`.
+- Post-bonus system TB: `remote_codex_jobs/bonus_full_uvm_20260520_013839/artifacts/vcs_system_tb_after_synth_fix/sim.log`, `>>> ALL TESTS PASSED <<<`.
 
 ## Contest-2 Bonus Matrix
 
 | Bonus item | Status | Evidence |
 |---|---:|---|
-| BF16/FP16 version | NOT_DONE | Not implemented; no FP arithmetic path or UVM checker was added. |
+| BF16/FP16 version | PASS | External BF16/FP16 I/O format support through `REG_FORMAT`; deterministic adapters are verified by `fa_uvm_bf16_fp16_test`. Internal compute remains fixed-point Q8.8, not native FP arithmetic. |
 | Multi-head support | PASS | Runtime `HEAD_COUNT/HEAD_STRIDE`; `fa_uvm_multi_head_test` checks two heads end-to-end. |
-| Longer/configurable sequence | PARTIAL | Runtime `VALID_LEN` supports shorter configured sequence/padding up to compiled `SEQ_LEN=256`; no S=512 build was completed. |
+| Longer/configurable sequence | PASS | Compile-time `SEQ_LEN=512` variant via `FA_SEQ_LEN_OVERRIDE`; `fa_uvm_seq512_test` runs bounded `VALID_LEN=260` and verifies rows beyond 255. |
 | Padding mask | PASS | `VALID_LEN` masks invalid rows/cols; UVM checks padded O rows stay zero. |
-| Additional Q formats Q6.10/Q4.12 | NOT_DONE | Not implemented; Q8.8 datapath remains the verified format. |
-| Dropout training mode | NOT_DONE | Not implemented; no dropout datapath or checker was added. |
-| INT8/FP8 direction | NOT_DONE | Not implemented; no lower-precision RTL path or checker was added. |
-| AXI4-Stream interface | NOT_DONE | Not implemented in this pass. |
+| Additional Q formats Q6.10/Q4.12 | PASS | External Q6.10 and Q4.12 I/O format support with format-aware golden comparison in `fa_uvm_fixed_format_test`. |
+| Dropout training mode | PASS | Deterministic inverted dropout on attention probabilities, controlled by enable/rate/seed registers and checked by `fa_uvm_dropout_test`. |
+| INT8/FP8 direction | PASS | External lower-precision I/O modes: lane-aligned INT8 Q4.4 and FP8 E4M3, checked by `fa_uvm_int8_fp8_test`. This does not pack two elements per 16-bit lane. |
+| AXI4-Stream interface | PASS | Standalone `axis_stream_bridge` ready/valid path with 8 scoreboard-checked beats and backpressure in `fa_uvm_axis_smoke_test`; not an attention-over-AXIS datapath. |
 | DMA/task queue | PASS | Active-job capture plus two-entry pending queue; `fa_uvm_task_queue_test` verifies two queued jobs and two output regions. |
 
 ## Verification Points
 
 ### Register Access
 
-- Reset defaults: `CTRL=0`, `STATUS=0`, `CFG=0`, base registers `0`, `STRIDE_BYTES=128`, `NEG_LARGE=0xFFFF8000`, `SCALE=0x20`, `VALID_LEN=256`, `HEAD_COUNT=1`, `HEAD_STRIDE=32768`, counters `0`.
-- RW registers: `CFG`, Q/K/V/O base low/high, `STRIDE_BYTES`, `NEG_LARGE`, `SCALE`, `VALID_LEN`, `HEAD_COUNT`, `HEAD_STRIDE`.
+- Reset defaults: `CTRL=0`, `STATUS=0`, `CFG=0`, base registers `0`, `STRIDE_BYTES=128`, `NEG_LARGE=0xFFFF8000`, `SCALE=0x20`, `VALID_LEN=SEQ_LEN`, `HEAD_COUNT=1`, `HEAD_STRIDE=SEQ_LEN*64*2`, `FORMAT=0`, `DROPOUT_CTRL=0`, `DROPOUT_RATE=0`, `DROPOUT_SEED=1`, counters `0`.
+- RW registers: `CFG`, Q/K/V/O base low/high, `STRIDE_BYTES`, `NEG_LARGE`, `SCALE`, `VALID_LEN`, `HEAD_COUNT`, `HEAD_STRIDE`, `FORMAT`, `DROPOUT_CTRL`, `DROPOUT_RATE`, `DROPOUT_SEED`.
 - RO registers: `CYCLES`, `RD_BYTES`, `WR_BYTES`, `QUEUE_STATUS` ignore writes.
 - STATUS behavior: `BUSY`, sticky `DONE`, write-1-clear `DONE`.
 - CTRL behavior: `START` pulse, `SOFT_RESET` pulse, `IRQ_EN` storage.
@@ -117,13 +123,17 @@ Latest passing UVM bonus evidence:
 - `CYCLES < 300000`.
 - Expected bandwidth counters: `RD_BYTES=2260992`, `WR_BYTES=32768`.
 - Bonus padding/multi-head/task-queue tests compute expected DMA bytes dynamically from `VALID_LEN`, `HEAD_COUNT`, and queued jobs.
+- Format-mode tests encode input tensors and decode output tensors through the selected external representation before comparison.
+- Dropout tests use the configured seed and rate in both RTL and UVM golden model, applying inverted dropout before the `P*V` accumulation.
+- `SEQ_LEN=512` verification compiles a separate variant and runs a bounded `VALID_LEN=260` test to prove addressing beyond the default 256 rows.
+- AXI4-Stream smoke verification checks ready/valid data movement and ordered payload delivery through the stream bridge.
 
 ### Coverage Targets
 
 - Register address access: all implemented RW/RO/W1C registers.
 - Register access kind: read and write.
 - Byte strobe bins: full and partial strobes.
-- Control flow: soft reset, start, busy observed, done observed, done W1C clear, causal enabled, padding, multi-head, and queue completion.
+- Control flow: soft reset, start, busy observed, done observed, done W1C clear, causal enabled, padding, multi-head, queue completion, format selection, deterministic dropout, and AXIS bridge completion.
 - DMA regions: Q, K, V reads and O writes.
 - AXI channels: AW, W, B, AR, R handshakes.
 - Burst lengths: Q/O tile bursts and K/V tile bursts.

@@ -6,6 +6,7 @@
 // After last KV-tile: normalize O by dividing by l (done externally or here)
 // ============================================================
 module output_accumulator #(
+    parameter SEQ_LEN    = 256,
     parameter TILE_BR    = 4,
     parameter TILE_BC    = 16,
     parameter HEAD_DIM   = 64,
@@ -37,6 +38,13 @@ module output_accumulator #(
 
     // l_new per row (for final normalization)
     input  logic [ACC_WIDTH-1:0]          l_values [TILE_BR-1:0],
+
+    // Deterministic inverted-dropout configuration for attention probabilities.
+    input  logic                          dropout_en,
+    input  logic [7:0]                    dropout_rate,
+    input  logic [31:0]                   dropout_seed,
+    input  logic [$clog2(SEQ_LEN/TILE_BR)-1:0] q_tile_idx,
+    input  logic [$clog2(SEQ_LEN/TILE_BC)-1:0] kv_tile_idx,
 
     // Output O tile: B_r × d, available when done
     output logic signed [DATA_WIDTH-1:0]  o_out [TILE_BR-1:0][HEAD_DIM-1:0],
@@ -129,6 +137,48 @@ module output_accumulator #(
                     level4[i] = level3[2 * i];
             end
             weighted_value_sum = level4[0];
+        end
+    endfunction
+
+    function automatic logic [31:0] dropout_hash(
+        input int unsigned abs_row,
+        input int unsigned abs_col
+    );
+        logic [31:0] h;
+        begin
+            h = dropout_seed ^ (32'(abs_row + 1) * 32'h9E37_79B1) ^
+                (32'(abs_col + 1) * 32'h85EB_CA6B);
+            h = h ^ (h >> 16);
+            h = h * 32'h7FEB_352D;
+            h = h ^ (h >> 15);
+            dropout_hash = h;
+        end
+    endfunction
+
+    function automatic logic [EXP_WIDTH-1:0] apply_dropout_to_prob(
+        input logic [EXP_WIDTH-1:0] prob,
+        input int unsigned abs_row,
+        input int unsigned abs_col
+    );
+        longint unsigned scaled;
+        int unsigned keep_den;
+        logic [31:0] hash_value;
+        begin
+            if (!dropout_en || dropout_rate == 8'd0 || prob == '0) begin
+                apply_dropout_to_prob = prob;
+            end else begin
+                hash_value = dropout_hash(abs_row, abs_col);
+                if (hash_value[7:0] < dropout_rate) begin
+                    apply_dropout_to_prob = '0;
+                end else begin
+                    keep_den = 256 - int'(dropout_rate);
+                    scaled = ((longint'(prob) * 256) + (keep_den >> 1)) / keep_den;
+                    if (scaled > ((longint'(1) << EXP_WIDTH) - 1))
+                        apply_dropout_to_prob = {EXP_WIDTH{1'b1}};
+                    else
+                        apply_dropout_to_prob = scaled[EXP_WIDTH-1:0];
+                end
+            end
         end
     endfunction
 
@@ -244,8 +294,12 @@ module output_accumulator #(
                                 logic signed [ACC_WIDTH-1:0] pv_sum;
                                 logic [EXP_WIDTH-1:0] prob_row [TILE_BC-1:0];
                                 logic signed [DATA_WIDTH-1:0] value_col [TILE_BC-1:0];
+                                int unsigned abs_row;
+                                int unsigned abs_col;
+                                abs_row = int'(q_tile_idx) * TILE_BR + r;
                                 for (int c = 0; c < TILE_BC; c++) begin
-                                    prob_row[c] = p_matrix[r][c];
+                                    abs_col = int'(kv_tile_idx) * TILE_BC + c;
+                                    prob_row[c] = apply_dropout_to_prob(p_matrix[r][c], abs_row, abs_col);
                                     value_col[c] = v_data[c][p];
                                 end
                                 pv_sum = weighted_value_sum(prob_row, value_col);

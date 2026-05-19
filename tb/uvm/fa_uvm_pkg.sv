@@ -3,7 +3,11 @@ package fa_uvm_pkg;
     import uvm_pkg::*;
     `include "uvm_macros.svh"
 
+`ifdef FA_SEQ_LEN_OVERRIDE
+    localparam int FA_SEQ_LEN  = `FA_SEQ_LEN_OVERRIDE;
+`else
     localparam int FA_SEQ_LEN  = 256;
+`endif
     localparam int FA_HEAD_DIM = 64;
     localparam int FA_TILE_BR  = 4;
     localparam int FA_TILE_BC  = 16;
@@ -19,15 +23,15 @@ package fa_uvm_pkg;
     localparam bit [63:0] FA_V_BASE_JOB1 = 64'h0000_0000_0013_0000;
     localparam bit [63:0] FA_O_BASE_JOB1 = 64'h0000_0000_0014_0000;
 
-    localparam longint unsigned FA_TENSOR_BYTES        = 32768;
-    localparam longint unsigned FA_TILE_QO_BYTES       = 512;
-    localparam longint unsigned FA_TILE_KV_BYTES       = 2048;
-    localparam longint unsigned FA_EXPECT_Q_READ_BYTES = 32768;
+    localparam longint unsigned FA_TENSOR_BYTES        = FA_SEQ_LEN * FA_HEAD_DIM * 2;
+    localparam longint unsigned FA_TILE_QO_BYTES       = FA_TILE_BR * FA_HEAD_DIM * 2;
+    localparam longint unsigned FA_TILE_KV_BYTES       = FA_TILE_BC * FA_HEAD_DIM * 2;
+    localparam longint unsigned FA_EXPECT_Q_READ_BYTES = FA_TENSOR_BYTES;
     localparam longint unsigned FA_EXPECT_K_READ_BYTES = 1114112;
     localparam longint unsigned FA_EXPECT_V_READ_BYTES = 1114112;
-    localparam longint unsigned FA_EXPECT_O_WR_BYTES   = 32768;
-    localparam longint unsigned FA_EXPECT_RD_BYTES     = 2260992;
-    localparam longint unsigned FA_EXPECT_WR_BYTES     = 32768;
+    localparam longint unsigned FA_EXPECT_O_WR_BYTES   = FA_TENSOR_BYTES;
+    localparam longint unsigned FA_EXPECT_RD_BYTES     = FA_EXPECT_Q_READ_BYTES + FA_EXPECT_K_READ_BYTES + FA_EXPECT_V_READ_BYTES;
+    localparam longint unsigned FA_EXPECT_WR_BYTES     = FA_EXPECT_O_WR_BYTES;
 
     localparam real FA_MEAN_LIMIT        = 0.03;
     localparam real FA_MAX_LIMIT         = 0.10;
@@ -54,6 +58,10 @@ package fa_uvm_pkg;
     localparam bit [7:0] FA_REG_HEAD_COUNT   = 8'h50;
     localparam bit [7:0] FA_REG_HEAD_STRIDE  = 8'h54;
     localparam bit [7:0] FA_REG_QUEUE_STATUS = 8'h58;
+    localparam bit [7:0] FA_REG_FORMAT       = 8'h5C;
+    localparam bit [7:0] FA_REG_DROPOUT_CTRL = 8'h60;
+    localparam bit [7:0] FA_REG_DROPOUT_RATE = 8'h64;
+    localparam bit [7:0] FA_REG_DROPOUT_SEED = 8'h68;
 
     localparam int FA_CTRL_START      = 0;
     localparam int FA_CTRL_SOFT_RESET = 1;
@@ -62,8 +70,17 @@ package fa_uvm_pkg;
     localparam int FA_STATUS_ERROR    = 2;
     localparam int FA_CFG_CAUSAL_EN   = 0;
 
+    localparam int FA_FORMAT_Q8_8      = 0;
+    localparam int FA_FORMAT_Q6_10     = 1;
+    localparam int FA_FORMAT_Q4_12     = 2;
+    localparam int FA_FORMAT_INT8_Q4_4 = 3;
+    localparam int FA_FORMAT_FP8_E4M3  = 4;
+    localparam int FA_FORMAT_FP16      = 5;
+    localparam int FA_FORMAT_BF16      = 6;
+
     `uvm_analysis_imp_decl(_axil)
     `uvm_analysis_imp_decl(_dma)
+    `uvm_analysis_imp_decl(_axis)
 
     function automatic longint unsigned fa_burst_byte_count(
         input bit [7:0] len,
@@ -125,6 +142,10 @@ package fa_uvm_pkg;
         rand bit [31:0] valid_len;
         rand bit [31:0] head_count;
         rand bit [31:0] head_stride_bytes;
+        rand bit [31:0] format_mode;
+        rand bit        dropout_en;
+        rand bit [31:0] dropout_rate;
+        rand bit [31:0] dropout_seed;
         int unsigned    job_id;
 
         `uvm_object_utils_begin(fa_attention_job_item)
@@ -139,6 +160,10 @@ package fa_uvm_pkg;
             `uvm_field_int(valid_len,    UVM_DEFAULT)
             `uvm_field_int(head_count,   UVM_DEFAULT)
             `uvm_field_int(head_stride_bytes, UVM_DEFAULT)
+            `uvm_field_int(format_mode,  UVM_DEFAULT)
+            `uvm_field_int(dropout_en,   UVM_DEFAULT)
+            `uvm_field_int(dropout_rate, UVM_DEFAULT)
+            `uvm_field_int(dropout_seed, UVM_DEFAULT | UVM_HEX)
             `uvm_field_int(job_id,       UVM_DEFAULT)
         `uvm_object_utils_end
 
@@ -155,6 +180,10 @@ package fa_uvm_pkg;
             valid_len    = FA_SEQ_LEN;
             head_count   = 32'd1;
             head_stride_bytes = 32'(FA_TENSOR_BYTES);
+            format_mode  = FA_FORMAT_Q8_8;
+            dropout_en   = 1'b0;
+            dropout_rate = 32'd0;
+            dropout_seed = 32'h0000_0001;
             job_id       = 0;
         endfunction
     endclass
@@ -179,6 +208,22 @@ package fa_uvm_pkg;
         `uvm_object_utils_end
 
         function new(string name = "fa_axi_dma_item");
+            super.new(name);
+        endfunction
+    endclass
+
+    class fa_axis_item extends uvm_sequence_item;
+        bit [127:0] data;
+        bit [15:0]  keep;
+        bit         last;
+
+        `uvm_object_utils_begin(fa_axis_item)
+            `uvm_field_int(data, UVM_DEFAULT | UVM_HEX)
+            `uvm_field_int(keep, UVM_DEFAULT | UVM_HEX)
+            `uvm_field_int(last, UVM_DEFAULT)
+        `uvm_object_utils_end
+
+        function new(string name = "fa_axis_item");
             super.new(name);
         endfunction
     endclass
@@ -684,6 +729,97 @@ package fa_uvm_pkg;
         endfunction
     endclass
 
+    class fa_axis_monitor extends uvm_component;
+        `uvm_component_utils(fa_axis_monitor)
+
+        virtual fa_axis_if vif;
+        uvm_analysis_port #(fa_axis_item) ap;
+
+        bit s_stall_q;
+        bit m_stall_q;
+        bit [127:0] s_data_hold;
+        bit [15:0]  s_keep_hold;
+        bit         s_last_hold;
+        bit [127:0] m_data_hold;
+        bit [15:0]  m_keep_hold;
+        bit         m_last_hold;
+
+        function new(string name, uvm_component parent);
+            super.new(name, parent);
+            ap = new("ap", this);
+        endfunction
+
+        function void build_phase(uvm_phase phase);
+            super.build_phase(phase);
+            if (!uvm_config_db#(virtual fa_axis_if)::get(this, "", "axis_vif", vif))
+                `uvm_fatal("NOVIF", "fa_axis_monitor requires axis_vif")
+        endfunction
+
+        task run_phase(uvm_phase phase);
+            forever begin
+                @(posedge vif.clk);
+                if (!vif.rst_n) begin
+                    s_stall_q = 1'b0;
+                    m_stall_q = 1'b0;
+                end else begin
+                    check_protocol();
+                    sample_output();
+                    update_stall_state();
+                end
+            end
+        endtask
+
+        function void check_protocol();
+            if (vif.s_tvalid && $isunknown({vif.s_tdata, vif.s_tkeep, vif.s_tlast, vif.s_tvalid, vif.s_tready}))
+                `uvm_fatal("AXISVIP", "X/Z on AXI4-Stream sink channel")
+            if (vif.m_tvalid && $isunknown({vif.m_tdata, vif.m_tkeep, vif.m_tlast, vif.m_tvalid, vif.m_tready}))
+                `uvm_fatal("AXISVIP", "X/Z on AXI4-Stream source channel")
+            if (s_stall_q) begin
+                if (!vif.s_tvalid)
+                    `uvm_fatal("AXISVIP", "S_AXIS TVALID dropped before TREADY")
+                if (vif.s_tdata !== s_data_hold || vif.s_tkeep !== s_keep_hold || vif.s_tlast !== s_last_hold)
+                    `uvm_fatal("AXISVIP", "S_AXIS payload changed while stalled")
+            end
+            if (m_stall_q) begin
+                if (!vif.m_tvalid)
+                    `uvm_fatal("AXISVIP", "M_AXIS TVALID dropped before TREADY")
+                if (vif.m_tdata !== m_data_hold || vif.m_tkeep !== m_keep_hold || vif.m_tlast !== m_last_hold)
+                    `uvm_fatal("AXISVIP", "M_AXIS payload changed while stalled")
+            end
+        endfunction
+
+        function void sample_output();
+            fa_axis_item tr;
+            if (vif.m_tvalid && vif.m_tready) begin
+                tr = fa_axis_item::type_id::create("axis_out_tr");
+                tr.data = vif.m_tdata;
+                tr.keep = vif.m_tkeep;
+                tr.last = vif.m_tlast;
+                ap.write(tr);
+            end
+        endfunction
+
+        function void update_stall_state();
+            if (vif.s_tvalid && !vif.s_tready) begin
+                s_stall_q = 1'b1;
+                s_data_hold = vif.s_tdata;
+                s_keep_hold = vif.s_tkeep;
+                s_last_hold = vif.s_tlast;
+            end else begin
+                s_stall_q = 1'b0;
+            end
+
+            if (vif.m_tvalid && !vif.m_tready) begin
+                m_stall_q = 1'b1;
+                m_data_hold = vif.m_tdata;
+                m_keep_hold = vif.m_tkeep;
+                m_last_hold = vif.m_tlast;
+            end else begin
+                m_stall_q = 1'b0;
+            end
+        endfunction
+    endclass
+
     class fa_axil_agent extends uvm_agent;
         `uvm_component_utils(fa_axil_agent)
 
@@ -733,6 +869,7 @@ package fa_uvm_pkg;
         virtual fa_mem_access_if mem_vif;
         uvm_analysis_imp_axil #(fa_axil_reg_item, fa_uvm_scoreboard) axil_export;
         uvm_analysis_imp_dma  #(fa_axi_dma_item,  fa_uvm_scoreboard) dma_export;
+        uvm_analysis_imp_axis #(fa_axis_item,     fa_uvm_scoreboard) axis_export;
 
         longint unsigned dma_q_read_bytes;
         longint unsigned dma_k_read_bytes;
@@ -751,6 +888,8 @@ package fa_uvm_pkg;
         bit seen_error;
 
         fa_attention_job_item expected_jobs[$];
+        fa_axis_item expected_axis_items[$];
+        int unsigned axis_observed_count;
 
         real q_f[0:FA_MAX_SCOREBOARD_JOBS-1][0:FA_MAX_HEADS-1][0:FA_SEQ_LEN-1][0:FA_HEAD_DIM-1];
         real k_f[0:FA_MAX_SCOREBOARD_JOBS-1][0:FA_MAX_HEADS-1][0:FA_SEQ_LEN-1][0:FA_HEAD_DIM-1];
@@ -768,6 +907,7 @@ package fa_uvm_pkg;
             super.new(name, parent);
             axil_export = new("axil_export", this);
             dma_export  = new("dma_export", this);
+            axis_export = new("axis_export", this);
         endfunction
 
         function void build_phase(uvm_phase phase);
@@ -794,6 +934,391 @@ package fa_uvm_pkg;
 
         function automatic longint unsigned head_stride_eff(fa_attention_job_item job);
             head_stride_eff = (job.head_stride_bytes == 0) ? FA_TENSOR_BYTES : job.head_stride_bytes;
+        endfunction
+
+        function automatic int unsigned format_eff(fa_attention_job_item job);
+            if (job.format_mode > FA_FORMAT_BF16)
+                format_eff = FA_FORMAT_Q8_8;
+            else
+                format_eff = job.format_mode;
+        endfunction
+
+        function automatic int unsigned dropout_rate_eff(fa_attention_job_item job);
+            if (!job.dropout_en)
+                dropout_rate_eff = 0;
+            else if (job.dropout_rate[7:0] == 8'hFF)
+                dropout_rate_eff = 254;
+            else
+                dropout_rate_eff = job.dropout_rate[7:0];
+        endfunction
+
+        function automatic longint signed sb_round_shift_right_signed(
+            input longint signed value,
+            input int unsigned shift
+        );
+            longint signed mag;
+            begin
+                if (shift == 0)
+                    sb_round_shift_right_signed = value;
+                else if (value >= 0)
+                    sb_round_shift_right_signed = (value + (64'sd1 <<< (shift - 1))) >>> shift;
+                else begin
+                    mag = -value;
+                    sb_round_shift_right_signed = -((mag + (64'sd1 <<< (shift - 1))) >>> shift);
+                end
+            end
+        endfunction
+
+        function automatic longint signed sb_apply_signed_shift(
+            input longint signed value,
+            input int signed shift
+        );
+            if (shift >= 0)
+                sb_apply_signed_shift = value <<< shift;
+            else
+                sb_apply_signed_shift = sb_round_shift_right_signed(value, int'(-shift));
+        endfunction
+
+        function automatic longint unsigned sb_round_shift_right_unsigned(
+            input longint unsigned value,
+            input int unsigned shift
+        );
+            if (shift == 0)
+                sb_round_shift_right_unsigned = value;
+            else
+                sb_round_shift_right_unsigned = (value + (64'd1 << (shift - 1))) >> shift;
+        endfunction
+
+        function automatic longint unsigned sb_apply_unsigned_shift(
+            input longint unsigned value,
+            input int signed shift
+        );
+            if (shift >= 0)
+                sb_apply_unsigned_shift = value << shift;
+            else
+                sb_apply_unsigned_shift = sb_round_shift_right_unsigned(value, int'(-shift));
+        endfunction
+
+        function automatic shortint signed sb_saturate_q8(input longint signed value);
+            if (value > 64'sd32767)
+                sb_saturate_q8 = 16'sh7FFF;
+            else if (value < -64'sd32768)
+                sb_saturate_q8 = 16'sh8000;
+            else
+                sb_saturate_q8 = value[15:0];
+        endfunction
+
+        function automatic byte signed sb_saturate_i8(input longint signed value);
+            if (value > 64'sd127)
+                sb_saturate_i8 = 8'sh7F;
+            else if (value < -64'sd128)
+                sb_saturate_i8 = 8'sh80;
+            else
+                sb_saturate_i8 = value[7:0];
+        endfunction
+
+        function automatic int sb_msb_index(input longint unsigned value);
+            begin
+                sb_msb_index = 0;
+                for (int i = 0; i < 63; i++) begin
+                    if (value[i])
+                        sb_msb_index = i;
+                end
+            end
+        endfunction
+
+        function automatic shortint signed sb_fp16_to_q8(input bit [15:0] raw);
+            bit sign;
+            int exp_raw;
+            int frac;
+            int exp_unbiased;
+            int shift;
+            longint signed mant;
+            longint signed scaled;
+            begin
+                sign = raw[15];
+                exp_raw = raw[14:10];
+                frac = raw[9:0];
+                if (exp_raw == 31)
+                    return sign ? 16'sh8000 : 16'sh7FFF;
+                if (exp_raw == 0 && frac == 0)
+                    return 16'sh0000;
+                if (exp_raw == 0) begin
+                    mant = frac;
+                    exp_unbiased = -14;
+                end else begin
+                    mant = 1024 + frac;
+                    exp_unbiased = exp_raw - 15;
+                end
+                shift = exp_unbiased - 2;
+                scaled = sb_apply_signed_shift(mant, shift);
+                return sb_saturate_q8(sign ? -scaled : scaled);
+            end
+        endfunction
+
+        function automatic shortint signed sb_bf16_to_q8(input bit [15:0] raw);
+            bit sign;
+            int exp_raw;
+            int frac;
+            int exp_unbiased;
+            int shift;
+            longint signed mant;
+            longint signed scaled;
+            begin
+                sign = raw[15];
+                exp_raw = raw[14:7];
+                frac = raw[6:0];
+                if (exp_raw == 255)
+                    return sign ? 16'sh8000 : 16'sh7FFF;
+                if (exp_raw == 0 && frac == 0)
+                    return 16'sh0000;
+                if (exp_raw == 0) begin
+                    mant = frac;
+                    exp_unbiased = -126;
+                end else begin
+                    mant = 128 + frac;
+                    exp_unbiased = exp_raw - 127;
+                end
+                shift = exp_unbiased + 1;
+                scaled = sb_apply_signed_shift(mant, shift);
+                return sb_saturate_q8(sign ? -scaled : scaled);
+            end
+        endfunction
+
+        function automatic shortint signed sb_fp8_e4m3_to_q8(input bit [7:0] raw);
+            bit sign;
+            int exp_raw;
+            int frac;
+            int exp_unbiased;
+            int shift;
+            longint signed mant;
+            longint signed scaled;
+            begin
+                sign = raw[7];
+                exp_raw = raw[6:3];
+                frac = raw[2:0];
+                if (exp_raw == 15)
+                    return sign ? 16'sh8000 : 16'sh7FFF;
+                if (exp_raw == 0 && frac == 0)
+                    return 16'sh0000;
+                if (exp_raw == 0) begin
+                    mant = frac;
+                    exp_unbiased = -6;
+                end else begin
+                    mant = 8 + frac;
+                    exp_unbiased = exp_raw - 7;
+                end
+                shift = exp_unbiased + 5;
+                scaled = sb_apply_signed_shift(mant, shift);
+                return sb_saturate_q8(sign ? -scaled : scaled);
+            end
+        endfunction
+
+        function automatic bit [15:0] sb_q8_to_fp16(input shortint signed value);
+            bit sign;
+            longint unsigned mag;
+            int exp_unbiased;
+            int exp_raw;
+            int shift;
+            longint unsigned sig;
+            begin
+                if (value == 0)
+                    return 16'h0000;
+                sign = value[15];
+                mag = sign ? longint'(-longint'(value)) : longint'(value);
+                exp_unbiased = sb_msb_index(mag) - 8;
+                if (exp_unbiased > 15)
+                    return {sign, 5'd30, 10'h3FF};
+                if (exp_unbiased < -14) begin
+                    sig = sb_apply_unsigned_shift(mag, 16);
+                    if (sig > 1023)
+                        sig = 1023;
+                    return {sign, 5'd0, sig[9:0]};
+                end
+                shift = 10 - exp_unbiased - 8;
+                sig = sb_apply_unsigned_shift(mag, shift);
+                if (sig >= 2048) begin
+                    sig = sig >> 1;
+                    exp_unbiased++;
+                end
+                exp_raw = exp_unbiased + 15;
+                if (exp_raw >= 31)
+                    return {sign, 5'd30, 10'h3FF};
+                return {sign, exp_raw[4:0], sig[9:0]};
+            end
+        endfunction
+
+        function automatic bit [15:0] sb_q8_to_bf16(input shortint signed value);
+            bit sign;
+            longint unsigned mag;
+            int exp_unbiased;
+            int exp_raw;
+            int shift;
+            longint unsigned sig;
+            begin
+                if (value == 0)
+                    return 16'h0000;
+                sign = value[15];
+                mag = sign ? longint'(-longint'(value)) : longint'(value);
+                exp_unbiased = sb_msb_index(mag) - 8;
+                shift = 7 - exp_unbiased - 8;
+                sig = sb_apply_unsigned_shift(mag, shift);
+                if (sig >= 256) begin
+                    sig = sig >> 1;
+                    exp_unbiased++;
+                end
+                exp_raw = exp_unbiased + 127;
+                if (exp_raw >= 255)
+                    return {sign, 8'd254, 7'h7F};
+                if (exp_raw <= 0)
+                    return {sign, 8'd0, 7'd0};
+                return {sign, exp_raw[7:0], sig[6:0]};
+            end
+        endfunction
+
+        function automatic bit [7:0] sb_q8_to_fp8_e4m3(input shortint signed value);
+            bit sign;
+            longint unsigned mag;
+            int exp_unbiased;
+            int exp_raw;
+            int shift;
+            longint unsigned sig;
+            begin
+                if (value == 0)
+                    return 8'h00;
+                sign = value[15];
+                mag = sign ? longint'(-longint'(value)) : longint'(value);
+                exp_unbiased = sb_msb_index(mag) - 8;
+                if (exp_unbiased < -6) begin
+                    sig = sb_apply_unsigned_shift(mag, 1);
+                    if (sig > 7)
+                        sig = 7;
+                    return {sign, 4'd0, sig[2:0]};
+                end
+                shift = 3 - exp_unbiased - 8;
+                sig = sb_apply_unsigned_shift(mag, shift);
+                if (sig >= 16) begin
+                    sig = sig >> 1;
+                    exp_unbiased++;
+                end
+                exp_raw = exp_unbiased + 7;
+                if (exp_raw >= 15)
+                    return {sign, 4'd14, 3'h7};
+                return {sign, exp_raw[3:0], sig[2:0]};
+            end
+        endfunction
+
+        function automatic bit [15:0] encode_external_from_q8(
+            input int unsigned fmt,
+            input shortint signed q8_value
+        );
+            byte signed i8;
+            begin
+                case (fmt)
+                    FA_FORMAT_Q6_10: encode_external_from_q8 = sb_saturate_q8(longint'(q8_value) <<< 2);
+                    FA_FORMAT_Q4_12: encode_external_from_q8 = sb_saturate_q8(longint'(q8_value) <<< 4);
+                    FA_FORMAT_INT8_Q4_4: begin
+                        i8 = sb_saturate_i8(sb_round_shift_right_signed(q8_value, 4));
+                        encode_external_from_q8 = {8'h00, i8};
+                    end
+                    FA_FORMAT_FP8_E4M3: encode_external_from_q8 = {8'h00, sb_q8_to_fp8_e4m3(q8_value)};
+                    FA_FORMAT_FP16:     encode_external_from_q8 = sb_q8_to_fp16(q8_value);
+                    FA_FORMAT_BF16:     encode_external_from_q8 = sb_q8_to_bf16(q8_value);
+                    default:            encode_external_from_q8 = q8_value[15:0];
+                endcase
+            end
+        endfunction
+
+        function automatic shortint signed decode_external_to_q8(
+            input int unsigned fmt,
+            input bit [15:0] raw
+        );
+            shortint signed raw_signed;
+            byte signed i8;
+            begin
+                raw_signed = raw;
+                i8 = raw[7:0];
+                case (fmt)
+                    FA_FORMAT_Q6_10:     decode_external_to_q8 = sb_saturate_q8(sb_round_shift_right_signed(raw_signed, 2));
+                    FA_FORMAT_Q4_12:     decode_external_to_q8 = sb_saturate_q8(sb_round_shift_right_signed(raw_signed, 4));
+                    FA_FORMAT_INT8_Q4_4: decode_external_to_q8 = sb_saturate_q8(longint'(i8) <<< 4);
+                    FA_FORMAT_FP8_E4M3:  decode_external_to_q8 = sb_fp8_e4m3_to_q8(raw[7:0]);
+                    FA_FORMAT_FP16:      decode_external_to_q8 = sb_fp16_to_q8(raw);
+                    FA_FORMAT_BF16:      decode_external_to_q8 = sb_bf16_to_q8(raw);
+                    default:             decode_external_to_q8 = raw_signed;
+                endcase
+            end
+        endfunction
+
+        function automatic real q8_to_real(input shortint signed value);
+            q8_to_real = $itor(value) / 256.0;
+        endfunction
+
+        function automatic logic [31:0] dropout_hash(
+            input fa_attention_job_item job,
+            input int unsigned abs_row,
+            input int unsigned abs_col
+        );
+            logic [31:0] h;
+            begin
+                h = job.dropout_seed ^ (32'(abs_row + 1) * 32'h9E37_79B1) ^
+                    (32'(abs_col + 1) * 32'h85EB_CA6B);
+                h = h ^ (h >> 16);
+                h = h * 32'h7FEB_352D;
+                h = h ^ (h >> 15);
+                dropout_hash = h;
+            end
+        endfunction
+
+        function automatic real apply_dropout_to_prob(
+            input fa_attention_job_item job,
+            input int unsigned abs_row,
+            input int unsigned abs_col,
+            input real prob
+        );
+            int unsigned rate;
+            real keep_prob;
+            begin
+                rate = dropout_rate_eff(job);
+                if (rate == 0 || prob == 0.0) begin
+                    apply_dropout_to_prob = prob;
+                end else if (dropout_hash(job, abs_row, abs_col)[7:0] < rate) begin
+                    apply_dropout_to_prob = 0.0;
+                end else begin
+                    keep_prob = (256.0 - $itor(rate)) / 256.0;
+                    apply_dropout_to_prob = prob / keep_prob;
+                end
+            end
+        endfunction
+
+        function automatic real mean_limit_for_jobs();
+            real limit;
+            begin
+                limit = FA_MEAN_LIMIT;
+                foreach (expected_jobs[j]) begin
+                    if (format_eff(expected_jobs[j]) == FA_FORMAT_INT8_Q4_4 ||
+                        format_eff(expected_jobs[j]) == FA_FORMAT_FP8_E4M3)
+                        limit = 0.06;
+                    if (expected_jobs[j].dropout_en)
+                        limit = 0.08;
+                end
+                mean_limit_for_jobs = limit;
+            end
+        endfunction
+
+        function automatic real max_limit_for_jobs();
+            real limit;
+            begin
+                limit = FA_MAX_LIMIT;
+                foreach (expected_jobs[j]) begin
+                    if (format_eff(expected_jobs[j]) == FA_FORMAT_INT8_Q4_4 ||
+                        format_eff(expected_jobs[j]) == FA_FORMAT_FP8_E4M3)
+                        limit = 0.18;
+                    if (expected_jobs[j].dropout_en)
+                        limit = 0.22;
+                end
+                max_limit_for_jobs = limit;
+            end
         endfunction
 
         function automatic shortint signed sample_raw(input int kind, input int unsigned job_id,
@@ -835,6 +1360,10 @@ package fa_uvm_pkg;
             cloned.valid_len = job.valid_len;
             cloned.head_count = job.head_count;
             cloned.head_stride_bytes = job.head_stride_bytes;
+            cloned.format_mode = job.format_mode;
+            cloned.dropout_en = job.dropout_en;
+            cloned.dropout_rate = job.dropout_rate;
+            cloned.dropout_seed = job.dropout_seed;
             cloned.job_id = job.job_id;
             clone_job = cloned;
         endfunction
@@ -963,6 +1492,41 @@ package fa_uvm_pkg;
             end
         endfunction
 
+        function void clear_expected_axis();
+            expected_axis_items.delete();
+            axis_observed_count = 0;
+        endfunction
+
+        function void add_expected_axis(input bit [127:0] data, input bit [15:0] keep, input bit last);
+            fa_axis_item tr;
+            tr = fa_axis_item::type_id::create("expected_axis");
+            tr.data = data;
+            tr.keep = keep;
+            tr.last = last;
+            expected_axis_items.push_back(tr);
+        endfunction
+
+        function void write_axis(fa_axis_item tr);
+            fa_axis_item exp;
+            if (expected_axis_items.size() == 0)
+                `uvm_fatal("AXISSB", $sformatf("Unexpected AXIS output data=0x%032h", tr.data))
+            exp = expected_axis_items.pop_front();
+            if (tr.data !== exp.data || tr.keep !== exp.keep || tr.last !== exp.last) begin
+                `uvm_fatal("AXISSB", $sformatf(
+                    "AXIS mismatch data actual=0x%032h expected=0x%032h keep actual=0x%04h expected=0x%04h last actual=%0d expected=%0d",
+                    tr.data, exp.data, tr.keep, exp.keep, tr.last, exp.last))
+            end
+            axis_observed_count++;
+        endfunction
+
+        function void check_axis_complete(input int unsigned expected_count);
+            if (axis_observed_count != expected_count || expected_axis_items.size() != 0) begin
+                `uvm_fatal("AXISSB", $sformatf(
+                    "AXIS observed_count=%0d expected_count=%0d remaining=%0d",
+                    axis_observed_count, expected_count, expected_axis_items.size()))
+            end
+        endfunction
+
         function void reset_dma_stats();
             dma_q_read_bytes      = 0;
             dma_k_read_bytes      = 0;
@@ -987,10 +1551,17 @@ package fa_uvm_pkg;
             shortint signed q_raw;
             shortint signed k_raw;
             shortint signed v_raw;
+            shortint signed q_q8;
+            shortint signed k_q8;
+            shortint signed v_q8;
+            bit [15:0] q_ext;
+            bit [15:0] k_ext;
+            bit [15:0] v_ext;
             longint unsigned stride;
 
-            `uvm_info("DATA", $sformatf("Loading job_id=%0d heads=%0d valid_len=%0d",
-                job.job_id, head_count_eff(job), valid_len_eff(job)), UVM_LOW)
+            `uvm_info("DATA", $sformatf("Loading job_id=%0d heads=%0d valid_len=%0d format=%0d dropout_en=%0d rate=%0d",
+                job.job_id, head_count_eff(job), valid_len_eff(job), format_eff(job),
+                job.dropout_en, dropout_rate_eff(job)), UVM_LOW)
             stride = head_stride_eff(job);
             for (int h = 0; h < head_count_eff(job); h++) begin
                 for (int i = 0; i < FA_SEQ_LEN; i++) begin
@@ -998,12 +1569,18 @@ package fa_uvm_pkg;
                         q_raw = sample_raw(0, job.job_id, h, i, j);
                         k_raw = sample_raw(1, job.job_id, h, i, j);
                         v_raw = sample_raw(2, job.job_id, h, i, j);
-                        q_f[job_slot][h][i][j] = $itor(q_raw) / 256.0;
-                        k_f[job_slot][h][i][j] = $itor(k_raw) / 256.0;
-                        v_f[job_slot][h][i][j] = $itor(v_raw) / 256.0;
-                        mem_vif.write16(tensor_addr(job.q_base, stride, h, i, j), q_raw[15:0]);
-                        mem_vif.write16(tensor_addr(job.k_base, stride, h, i, j), k_raw[15:0]);
-                        mem_vif.write16(tensor_addr(job.v_base, stride, h, i, j), v_raw[15:0]);
+                        q_ext = encode_external_from_q8(format_eff(job), q_raw);
+                        k_ext = encode_external_from_q8(format_eff(job), k_raw);
+                        v_ext = encode_external_from_q8(format_eff(job), v_raw);
+                        q_q8 = decode_external_to_q8(format_eff(job), q_ext);
+                        k_q8 = decode_external_to_q8(format_eff(job), k_ext);
+                        v_q8 = decode_external_to_q8(format_eff(job), v_ext);
+                        q_f[job_slot][h][i][j] = q8_to_real(q_q8);
+                        k_f[job_slot][h][i][j] = q8_to_real(k_q8);
+                        v_f[job_slot][h][i][j] = q8_to_real(v_q8);
+                        mem_vif.write16(tensor_addr(job.q_base, stride, h, i, j), q_ext);
+                        mem_vif.write16(tensor_addr(job.k_base, stride, h, i, j), k_ext);
+                        mem_vif.write16(tensor_addr(job.v_base, stride, h, i, j), v_ext);
                         mem_vif.write16(tensor_addr(job.o_base, stride, h, i, j), 16'h0000);
                     end
                 end
@@ -1067,6 +1644,7 @@ package fa_uvm_pkg;
                     if (job.causal_en && j > i)
                         s_val = -1e9;
                     p_val = $exp(s_val - row_max) / row_sum;
+                    p_val = apply_dropout_to_prob(job, i, j, p_val);
                     for (int k = 0; k < FA_HEAD_DIM; k++)
                         golden_o[job_slot][head][i][k] += p_val * v_f[job_slot][head][j][k];
                 end
@@ -1103,8 +1681,11 @@ package fa_uvm_pkg;
 
             expected_dma_totals(exp_q, exp_k, exp_v, exp_o, exp_rd, exp_wr);
             cycle_limit = 300000;
-            if (expected_jobs.size() != 0)
+            if (expected_jobs.size() != 0) begin
                 cycle_limit = 300000 * head_count_eff(expected_jobs[0]);
+                if (FA_SEQ_LEN > 256 || valid_len_eff(expected_jobs[0]) > 256)
+                    cycle_limit = 700000 * head_count_eff(expected_jobs[0]);
+            end
             if (cycles_val >= cycle_limit)
                 `uvm_fatal("PERF", $sformatf("CYCLES=%0d, expected < %0d", cycles_val, cycle_limit))
             if (rd_bytes_val != exp_rd[31:0])
@@ -1120,6 +1701,8 @@ package fa_uvm_pkg;
             real gold_val;
             real abs_err;
             real row0_abs_err;
+            real mean_limit;
+            real max_limit;
             int err_count;
             longint unsigned stride;
 
@@ -1128,6 +1711,8 @@ package fa_uvm_pkg;
             last_max_err = 0.0;
             last_row0_causal_err = 0.0;
             err_count = 0;
+            mean_limit = mean_limit_for_jobs();
+            max_limit = max_limit_for_jobs();
 
             foreach (expected_jobs[job_idx]) begin
                 stride = head_stride_eff(expected_jobs[job_idx]);
@@ -1135,8 +1720,8 @@ package fa_uvm_pkg;
                     for (int i = 0; i < FA_SEQ_LEN; i++) begin
                         for (int j = 0; j < FA_HEAD_DIM; j++) begin
                             mem_vif.read16(tensor_addr(expected_jobs[job_idx].o_base, stride, h, i, j), raw_o);
-                            o_val = shortint'(raw_o);
-                            dut_val = $itor(o_val) / 256.0;
+                            o_val = decode_external_to_q8(format_eff(expected_jobs[job_idx]), raw_o);
+                            dut_val = q8_to_real(o_val);
                             gold_val = golden_o[job_idx][h][i][j];
                             abs_err = dut_val - gold_val;
                             if (abs_err < 0.0)
@@ -1160,11 +1745,11 @@ package fa_uvm_pkg;
 
             last_mean_err = last_mean_err / $itor(err_count);
 
-            if (last_mean_err > FA_MEAN_LIMIT)
-                `uvm_fatal("GOLDEN", $sformatf("mean_abs_error=%0.6f, expected <= %0.6f", last_mean_err, FA_MEAN_LIMIT))
-            if (last_max_err > FA_MAX_LIMIT)
-                `uvm_fatal("GOLDEN", $sformatf("max_abs_error=%0.6f, expected <= %0.6f", last_max_err, FA_MAX_LIMIT))
-            if (last_row0_causal_err > FA_CAUSAL_ROW0_LIMIT)
+            if (last_mean_err > mean_limit)
+                `uvm_fatal("GOLDEN", $sformatf("mean_abs_error=%0.6f, expected <= %0.6f", last_mean_err, mean_limit))
+            if (last_max_err > max_limit)
+                `uvm_fatal("GOLDEN", $sformatf("max_abs_error=%0.6f, expected <= %0.6f", last_max_err, max_limit))
+            if (!expected_jobs[0].dropout_en && last_row0_causal_err > FA_CAUSAL_ROW0_LIMIT)
                 `uvm_fatal("GOLDEN", $sformatf("row0_causal=%0.6f, expected <= %0.6f",
                     last_row0_causal_err, FA_CAUSAL_ROW0_LIMIT))
 
@@ -1238,6 +1823,10 @@ package fa_uvm_pkg;
                 bins head_count = {FA_REG_HEAD_COUNT};
                 bins head_stride = {FA_REG_HEAD_STRIDE};
                 bins queue_status = {FA_REG_QUEUE_STATUS};
+                bins format = {FA_REG_FORMAT};
+                bins dropout_ctrl = {FA_REG_DROPOUT_CTRL};
+                bins dropout_rate = {FA_REG_DROPOUT_RATE};
+                bins dropout_seed = {FA_REG_DROPOUT_SEED};
             }
             cp_strb: coverpoint strb iff (is_write) {
                 bins full     = {4'hF};
@@ -1261,6 +1850,10 @@ package fa_uvm_pkg;
                 bins padding    = {7};
                 bins multi_head = {8};
                 bins queue      = {9};
+                bins format     = {10};
+                bins dropout    = {11};
+                bins seq512     = {12};
+                bins axis       = {13};
             }
         endgroup
 
@@ -1346,6 +1939,12 @@ package fa_uvm_pkg;
                 flow_cg.sample(8);
             if (!tr.write && tr.addr == FA_REG_QUEUE_STATUS && tr.rdata[15:8] >= 2)
                 flow_cg.sample(9);
+            if (tr.write && tr.addr == FA_REG_FORMAT && tr.data[2:0] != FA_FORMAT_Q8_8)
+                flow_cg.sample(10);
+            if (tr.write && tr.addr == FA_REG_DROPOUT_CTRL && tr.data[0])
+                flow_cg.sample(11);
+            if (tr.write && tr.addr == FA_REG_VALID_LEN && tr.data > 256)
+                flow_cg.sample(12);
             if (!tr.write && tr.addr == FA_REG_STATUS) begin
                 if (tr.rdata[FA_STATUS_BUSY])
                     flow_cg.sample(2);
@@ -1366,9 +1965,9 @@ package fa_uvm_pkg;
 
         function void sample_perf(int cycles, real mean_err, real max_err, real causal_err);
             perf_cg.sample(cycles,
-                (mean_err <= FA_MEAN_LIMIT) ? 0 : 1,
-                (max_err <= FA_MAX_LIMIT) ? 0 : 1,
-                (causal_err <= FA_CAUSAL_ROW0_LIMIT) ? 0 : 1);
+                (mean_err <= 0.10) ? 0 : 1,
+                (max_err <= 0.25) ? 0 : 1,
+                (causal_err <= 0.25) ? 0 : 1);
         endfunction
 
         function void report_phase(uvm_phase phase);
@@ -1387,9 +1986,11 @@ package fa_uvm_pkg;
         virtual fa_axil_if        axil_vif;
         virtual fa_axi4_master_if axi_vif;
         virtual fa_mem_access_if  mem_vif;
+        virtual fa_axis_if        axis_vif;
 
         fa_axil_agent    axil_agent;
         fa_axi_dma_agent dma_agent;
+        fa_axis_monitor  axis_monitor;
         fa_uvm_scoreboard scoreboard;
         fa_uvm_coverage   coverage;
 
@@ -1405,9 +2006,12 @@ package fa_uvm_pkg;
                 `uvm_fatal("NOVIF", "fa_uvm_env requires axi_vif")
             if (!uvm_config_db#(virtual fa_mem_access_if)::get(this, "", "mem_vif", mem_vif))
                 `uvm_fatal("NOVIF", "fa_uvm_env requires mem_vif")
+            if (!uvm_config_db#(virtual fa_axis_if)::get(this, "", "axis_vif", axis_vif))
+                `uvm_fatal("NOVIF", "fa_uvm_env requires axis_vif")
 
             axil_agent = fa_axil_agent::type_id::create("axil_agent", this);
             dma_agent  = fa_axi_dma_agent::type_id::create("dma_agent", this);
+            axis_monitor = fa_axis_monitor::type_id::create("axis_monitor", this);
             scoreboard = fa_uvm_scoreboard::type_id::create("scoreboard", this);
             coverage   = fa_uvm_coverage::type_id::create("coverage", this);
             axil_agent.is_active = UVM_ACTIVE;
@@ -1419,6 +2023,7 @@ package fa_uvm_pkg;
             axil_agent.monitor.ap.connect(coverage.axil_export);
             dma_agent.monitor.ap.connect(scoreboard.dma_export);
             dma_agent.monitor.ap.connect(coverage.dma_export);
+            axis_monitor.ap.connect(scoreboard.axis_export);
         endfunction
     endclass
 
@@ -1479,6 +2084,10 @@ package fa_uvm_pkg;
             axil_write(FA_REG_VALID_LEN, job.valid_len);
             axil_write(FA_REG_HEAD_COUNT, job.head_count);
             axil_write(FA_REG_HEAD_STRIDE, job.head_stride_bytes);
+            axil_write(FA_REG_FORMAT, job.format_mode);
+            axil_write(FA_REG_DROPOUT_CTRL, {31'd0, job.dropout_en});
+            axil_write(FA_REG_DROPOUT_RATE, job.dropout_rate);
+            axil_write(FA_REG_DROPOUT_SEED, job.dropout_seed);
             axil_write(FA_REG_CFG, {31'd0, job.causal_en});
         endtask
     endclass
@@ -1511,10 +2120,14 @@ package fa_uvm_pkg;
             axil_read_check(FA_REG_CYCLES,       32'h0000_0000, "CYCLES reset");
             axil_read_check(FA_REG_RD_BYTES,     32'h0000_0000, "RD_BYTES reset");
             axil_read_check(FA_REG_WR_BYTES,     32'h0000_0000, "WR_BYTES reset");
-            axil_read_check(FA_REG_VALID_LEN,    32'd256,       "VALID_LEN reset");
+            axil_read_check(FA_REG_VALID_LEN,    32'(FA_SEQ_LEN), "VALID_LEN reset");
             axil_read_check(FA_REG_HEAD_COUNT,   32'd1,         "HEAD_COUNT reset");
-            axil_read_check(FA_REG_HEAD_STRIDE,  32'd32768,     "HEAD_STRIDE reset");
+            axil_read_check(FA_REG_HEAD_STRIDE,  32'(FA_TENSOR_BYTES), "HEAD_STRIDE reset");
             axil_read_check(FA_REG_QUEUE_STATUS, 32'h0000_0000, "QUEUE_STATUS reset");
+            axil_read_check(FA_REG_FORMAT,       32'h0000_0000, "FORMAT reset");
+            axil_read_check(FA_REG_DROPOUT_CTRL, 32'h0000_0000, "DROPOUT_CTRL reset");
+            axil_read_check(FA_REG_DROPOUT_RATE, 32'h0000_0000, "DROPOUT_RATE reset");
+            axil_read_check(FA_REG_DROPOUT_SEED, 32'h0000_0001, "DROPOUT_SEED reset");
 
             axil_write(FA_REG_CFG, 32'h0000_0001);
             axil_read_check(FA_REG_CFG, 32'h0000_0001, "CFG causal write");
@@ -1534,8 +2147,16 @@ package fa_uvm_pkg;
             axil_read_check(FA_REG_VALID_LEN, 32'd130, "VALID_LEN write");
             axil_write(FA_REG_HEAD_COUNT, 32'd2);
             axil_read_check(FA_REG_HEAD_COUNT, 32'd2, "HEAD_COUNT write");
-            axil_write(FA_REG_HEAD_STRIDE, 32'd32768);
-            axil_read_check(FA_REG_HEAD_STRIDE, 32'd32768, "HEAD_STRIDE write");
+            axil_write(FA_REG_HEAD_STRIDE, 32'(FA_TENSOR_BYTES));
+            axil_read_check(FA_REG_HEAD_STRIDE, 32'(FA_TENSOR_BYTES), "HEAD_STRIDE write");
+            axil_write(FA_REG_FORMAT, 32'(FA_FORMAT_Q6_10));
+            axil_read_check(FA_REG_FORMAT, 32'(FA_FORMAT_Q6_10), "FORMAT write");
+            axil_write(FA_REG_DROPOUT_CTRL, 32'h0000_0001);
+            axil_read_check(FA_REG_DROPOUT_CTRL, 32'h0000_0001, "DROPOUT_CTRL write");
+            axil_write(FA_REG_DROPOUT_RATE, 32'd64);
+            axil_read_check(FA_REG_DROPOUT_RATE, 32'd64, "DROPOUT_RATE write");
+            axil_write(FA_REG_DROPOUT_SEED, 32'hCAFE_1234);
+            axil_read_check(FA_REG_DROPOUT_SEED, 32'hCAFE_1234, "DROPOUT_SEED write");
 
             axil_write(FA_REG_CYCLES, 32'hDEAD_BEEF);
             axil_read_check(FA_REG_CYCLES, 32'h0000_0000, "CYCLES RO write ignored");
@@ -1680,6 +2301,78 @@ package fa_uvm_pkg;
             job_seq.env = env;
             job_seq.job = job;
             job_seq.start(m_sequencer);
+        endtask
+    endclass
+
+    class fa_uvm_axis_smoke_sequence extends fa_axil_base_sequence;
+        `uvm_object_utils(fa_uvm_axis_smoke_sequence)
+
+        fa_uvm_env env;
+
+        function new(string name = "fa_uvm_axis_smoke_sequence");
+            super.new(name);
+        endfunction
+
+        task automatic drive_axis_beat(input bit [127:0] data, input bit [15:0] keep, input bit last);
+            @(posedge env.axis_vif.clk);
+            env.axis_vif.s_tdata  <= data;
+            env.axis_vif.s_tkeep  <= keep;
+            env.axis_vif.s_tlast  <= last;
+            env.axis_vif.s_tvalid <= 1'b1;
+            do begin
+                @(posedge env.axis_vif.clk);
+            end while (!env.axis_vif.s_tready);
+            env.axis_vif.s_tvalid <= 1'b0;
+            env.axis_vif.s_tlast  <= 1'b0;
+        endtask
+
+        task body();
+            const int NUM_BEATS = 8;
+            int timeout_cnt;
+
+            if (env == null)
+                `uvm_fatal("NOENV", "fa_uvm_axis_smoke_sequence requires env handle")
+
+            wait (env.axis_vif.rst_n === 1'b1);
+            repeat (10) @(posedge env.axis_vif.clk);
+            env.scoreboard.clear_expected_axis();
+            env.axis_vif.s_tdata  <= '0;
+            env.axis_vif.s_tkeep  <= '0;
+            env.axis_vif.s_tlast  <= 1'b0;
+            env.axis_vif.s_tvalid <= 1'b0;
+            env.axis_vif.m_tready <= 1'b0;
+
+            fork
+                begin
+                    forever begin
+                        @(posedge env.axis_vif.clk);
+                        env.axis_vif.m_tready <= (($time / 2) % 5) != 1;
+                    end
+                end
+            join_none
+
+            for (int i = 0; i < NUM_BEATS; i++) begin
+                bit [127:0] data;
+                bit [15:0] keep;
+                bit last;
+                data = {32'hA500_0000 | i[31:0], 32'h5A00_1000 | i[31:0],
+                        32'hC300_2000 | i[31:0], 32'h3C00_3000 | i[31:0]};
+                keep = (i == NUM_BEATS - 1) ? 16'h00FF : 16'hFFFF;
+                last = (i == NUM_BEATS - 1);
+                env.scoreboard.add_expected_axis(data, keep, last);
+                drive_axis_beat(data, keep, last);
+                repeat ((i % 3) + 1) @(posedge env.axis_vif.clk);
+            end
+
+            timeout_cnt = 0;
+            while (env.scoreboard.axis_observed_count < NUM_BEATS && timeout_cnt < 1000) begin
+                @(posedge env.axis_vif.clk);
+                timeout_cnt++;
+            end
+            env.scoreboard.check_axis_complete(NUM_BEATS);
+            env.coverage.flow_cg.sample(13);
+            env.axis_vif.m_tready <= 1'b0;
+            `uvm_info("AXISSEQ", $sformatf("AXI4-Stream bridge PASS beats=%0d", NUM_BEATS), UVM_NONE)
         endtask
     endclass
 
@@ -1876,6 +2569,138 @@ package fa_uvm_pkg;
             seq.env = env;
             seq.start(env.axil_agent.sequencer);
             `uvm_info("FA_UVM_PASS", ">>> UVM TASK QUEUE TESTS PASSED <<<", UVM_NONE)
+            phase.drop_objection(this);
+        endtask
+    endclass
+
+    class fa_uvm_bf16_fp16_test extends fa_uvm_base_test;
+        `uvm_component_utils(fa_uvm_bf16_fp16_test)
+
+        function new(string name, uvm_component parent);
+            super.new(name, parent);
+        endfunction
+
+        task run_phase(uvm_phase phase);
+            fa_uvm_bonus_job_sequence seq;
+            phase.raise_objection(this);
+            for (int fmt_idx = 0; fmt_idx < 2; fmt_idx++) begin
+                seq = fa_uvm_bonus_job_sequence::type_id::create($sformatf("seq_fp_%0d", fmt_idx));
+                seq.env = env;
+                seq.job.valid_len = 32'd64;
+                seq.job.format_mode = (fmt_idx == 0) ? FA_FORMAT_FP16 : FA_FORMAT_BF16;
+                seq.job.job_id = fmt_idx;
+                seq.start(env.axil_agent.sequencer);
+            end
+            `uvm_info("FA_UVM_PASS", ">>> UVM BF16/FP16 EXTERNAL I/O FORMAT TESTS PASSED <<<", UVM_NONE)
+            phase.drop_objection(this);
+        endtask
+    endclass
+
+    class fa_uvm_fixed_format_test extends fa_uvm_base_test;
+        `uvm_component_utils(fa_uvm_fixed_format_test)
+
+        function new(string name, uvm_component parent);
+            super.new(name, parent);
+        endfunction
+
+        task run_phase(uvm_phase phase);
+            fa_uvm_bonus_job_sequence seq;
+            phase.raise_objection(this);
+            for (int fmt_idx = 0; fmt_idx < 2; fmt_idx++) begin
+                seq = fa_uvm_bonus_job_sequence::type_id::create($sformatf("seq_fixed_%0d", fmt_idx));
+                seq.env = env;
+                seq.job.valid_len = 32'd64;
+                seq.job.format_mode = (fmt_idx == 0) ? FA_FORMAT_Q6_10 : FA_FORMAT_Q4_12;
+                seq.job.job_id = fmt_idx;
+                seq.start(env.axil_agent.sequencer);
+            end
+            `uvm_info("FA_UVM_PASS", ">>> UVM Q6.10/Q4.12 FORMAT TESTS PASSED <<<", UVM_NONE)
+            phase.drop_objection(this);
+        endtask
+    endclass
+
+    class fa_uvm_int8_fp8_test extends fa_uvm_base_test;
+        `uvm_component_utils(fa_uvm_int8_fp8_test)
+
+        function new(string name, uvm_component parent);
+            super.new(name, parent);
+        endfunction
+
+        task run_phase(uvm_phase phase);
+            fa_uvm_bonus_job_sequence seq;
+            phase.raise_objection(this);
+            for (int fmt_idx = 0; fmt_idx < 2; fmt_idx++) begin
+                seq = fa_uvm_bonus_job_sequence::type_id::create($sformatf("seq_lowp_%0d", fmt_idx));
+                seq.env = env;
+                seq.job.valid_len = 32'd64;
+                seq.job.format_mode = (fmt_idx == 0) ? FA_FORMAT_INT8_Q4_4 : FA_FORMAT_FP8_E4M3;
+                seq.job.job_id = fmt_idx;
+                seq.start(env.axil_agent.sequencer);
+            end
+            `uvm_info("FA_UVM_PASS", ">>> UVM INT8/FP8 EXTERNAL I/O FORMAT TESTS PASSED <<<", UVM_NONE)
+            phase.drop_objection(this);
+        endtask
+    endclass
+
+    class fa_uvm_dropout_test extends fa_uvm_base_test;
+        `uvm_component_utils(fa_uvm_dropout_test)
+
+        function new(string name, uvm_component parent);
+            super.new(name, parent);
+        endfunction
+
+        task run_phase(uvm_phase phase);
+            fa_uvm_bonus_job_sequence seq;
+            phase.raise_objection(this);
+            seq = fa_uvm_bonus_job_sequence::type_id::create("seq_dropout");
+            seq.env = env;
+            seq.job.valid_len = 32'd64;
+            seq.job.dropout_en = 1'b1;
+            seq.job.dropout_rate = 32'd64;
+            seq.job.dropout_seed = 32'hC0DE_5EED;
+            seq.job.job_id = 0;
+            seq.start(env.axil_agent.sequencer);
+            `uvm_info("FA_UVM_PASS", ">>> UVM DETERMINISTIC DROPOUT TESTS PASSED <<<", UVM_NONE)
+            phase.drop_objection(this);
+        endtask
+    endclass
+
+    class fa_uvm_seq512_test extends fa_uvm_base_test;
+        `uvm_component_utils(fa_uvm_seq512_test)
+
+        function new(string name, uvm_component parent);
+            super.new(name, parent);
+        endfunction
+
+        task run_phase(uvm_phase phase);
+            fa_uvm_bonus_job_sequence seq;
+            phase.raise_objection(this);
+            if (FA_SEQ_LEN < 512)
+                `uvm_fatal("SEQ512", $sformatf("fa_uvm_seq512_test requires FA_SEQ_LEN>=512, got %0d", FA_SEQ_LEN))
+            seq = fa_uvm_bonus_job_sequence::type_id::create("seq512");
+            seq.env = env;
+            seq.job.valid_len = 32'd260;
+            seq.job.job_id = 0;
+            seq.start(env.axil_agent.sequencer);
+            `uvm_info("FA_UVM_PASS", ">>> UVM SEQ_LEN=512 BOUNDED TESTS PASSED <<<", UVM_NONE)
+            phase.drop_objection(this);
+        endtask
+    endclass
+
+    class fa_uvm_axis_smoke_test extends fa_uvm_base_test;
+        `uvm_component_utils(fa_uvm_axis_smoke_test)
+
+        function new(string name, uvm_component parent);
+            super.new(name, parent);
+        endfunction
+
+        task run_phase(uvm_phase phase);
+            fa_uvm_axis_smoke_sequence seq;
+            phase.raise_objection(this);
+            seq = fa_uvm_axis_smoke_sequence::type_id::create("seq_axis");
+            seq.env = env;
+            seq.start(env.axil_agent.sequencer);
+            `uvm_info("FA_UVM_PASS", ">>> UVM AXI4-STREAM SMOKE TESTS PASSED <<<", UVM_NONE)
             phase.drop_objection(this);
         endtask
     endclass

@@ -69,6 +69,10 @@ module flash_attention_top (
     logic [31:0] reg_stride_bytes;
     logic signed [15:0] reg_neg_large, reg_scale;
     logic [31:0] reg_valid_len, reg_head_count, reg_head_stride_bytes;
+    logic [2:0]  reg_format_mode;
+    logic        reg_dropout_en;
+    logic [7:0]  reg_dropout_rate;
+    logic [31:0] reg_dropout_seed;
     logic        status_busy, status_done, status_error;
     logic [31:0] cycle_count;
     logic [31:0] rd_bytes_count, wr_bytes_count;
@@ -102,6 +106,10 @@ module flash_attention_top (
         .reg_valid_len(reg_valid_len),
         .reg_head_count(reg_head_count),
         .reg_head_stride_bytes(reg_head_stride_bytes),
+        .reg_format_mode(reg_format_mode),
+        .reg_dropout_en(reg_dropout_en),
+        .reg_dropout_rate(reg_dropout_rate),
+        .reg_dropout_seed(reg_dropout_seed),
         .reg_neg_large(reg_neg_large), .reg_scale(reg_scale),
         .status_busy(status_busy), .status_done(status_done), .status_error(status_error),
         .cycle_count(cycle_count),
@@ -140,6 +148,10 @@ module flash_attention_top (
         logic [7:0]  head_count;
         logic [31:0] head_stride_bytes;
         logic        causal_en;
+        logic [2:0]  format_mode;
+        logic        dropout_en;
+        logic [7:0]  dropout_rate;
+        logic [31:0] dropout_seed;
         logic signed [15:0] neg_large;
         logic signed [15:0] scale;
     } job_cfg_t;
@@ -164,6 +176,10 @@ module flash_attention_top (
             job.head_stride_bytes = (reg_head_stride_bytes == 32'd0) ?
                                     32'(DEFAULT_HEAD_STRIDE_BYTES) : reg_head_stride_bytes;
             job.causal_en         = reg_causal_en;
+            job.format_mode       = reg_format_mode;
+            job.dropout_en        = reg_dropout_en;
+            job.dropout_rate      = reg_dropout_rate;
+            job.dropout_seed      = reg_dropout_seed;
             job.neg_large         = reg_neg_large;
             job.scale             = reg_scale;
             current_reg_job       = job;
@@ -317,6 +333,7 @@ module flash_attention_top (
         .k_buf_sel(tc_kv_buf_sel),
         .v_wr_en(buf_v_wr_en), .v_wr_addr(buf_v_wr_addr), .v_wr_data(buf_v_wr_data),
         .v_buf_sel(tc_kv_buf_sel),
+        .format_mode(active_job.format_mode),
         .q_rd_en(comp_q_rd_en), .q_rd_step(comp_q_step), .q_rd_data(comp_q_data),
         .k_rd_en(comp_k_rd_en), .k_rd_step(comp_k_step),
         .k_rd_buf_sel(tc_kv_buf_sel), .k_rd_data(comp_k_data),
@@ -338,6 +355,9 @@ module flash_attention_top (
         .done(tc_compute_done), .busy(),
         .q_tile_idx(tc_q_tile_idx), .kv_tile_idx(tc_kv_tile_idx),
         .causal_en(active_job.causal_en), .valid_len(active_valid_len_cfg),
+        .dropout_en(active_job.dropout_en),
+        .dropout_rate(active_job.dropout_rate),
+        .dropout_seed(active_job.dropout_seed),
         .scale(active_job.scale), .neg_large(active_job.neg_large),
         .q_rd_en(comp_q_rd_en), .q_rd_step(comp_q_step), .q_data(comp_q_data),
         .k_rd_en(comp_k_rd_en), .k_rd_step(comp_k_step), .k_data(comp_k_data),

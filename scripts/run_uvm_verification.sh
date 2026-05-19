@@ -41,6 +41,7 @@ RTL_FILES=(
     "${PROJECT_ROOT}/rtl/axi4_lite_slave.sv"
     "${PROJECT_ROOT}/rtl/axi4_master_if.sv"
     "${PROJECT_ROOT}/rtl/dma_engine.sv"
+    "${PROJECT_ROOT}/rtl/axis_stream_bridge.sv"
     "${PROJECT_ROOT}/rtl/flash_attention_top.sv"
 )
 
@@ -62,6 +63,16 @@ VCS_ARGS=(
     -timescale=1ns/1ps
     -top fa_uvm_tb
 )
+
+if [ -n "${VCS_EXTRA_DEFINES:-}" ]; then
+    # Intentionally split a whitespace-separated list such as
+    # "FA_SEQ_LEN_OVERRIDE=512 FOO".
+    # shellcheck disable=SC2206
+    EXTRA_DEFINES=(${VCS_EXTRA_DEFINES})
+    for define in "${EXTRA_DEFINES[@]}"; do
+        VCS_ARGS+=("+define+${define}")
+    done
+fi
 
 SIM_ARGS=(
     "+UVM_TESTNAME=${UVM_TESTNAME}"

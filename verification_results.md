@@ -3,7 +3,7 @@
 This report tracks the RTL against the Contest-2 requirements for the
 `S=256, d=64, batch=1, head=1` FlashAttention accelerator.
 
-Last updated: 2026-05-20 01:24 CST.
+Last updated: 2026-05-20 02:01 CST.
 
 ## Tool Environment
 
@@ -143,41 +143,71 @@ row0_causal:        0.003906
 
 ## Contest-2 Bonus UVM Results
 
-This run adds three UVM-verified bonus features while preserving the default
-single-head `S=256, d=64` causal behavior.
+This run completes the bonus UVM coverage pass while preserving the default
+single-head `S=256, d=64` causal behavior. Format support is external tensor
+I/O conversion around the existing internal Q8.8 compute core; it is not native
+floating-point arithmetic.
 
-Bonus runner:
-`scripts/run_uvm_bonus.sh`
+Run directory:
+`remote_codex_jobs/bonus_full_uvm_20260520_013839`
+
+Bonus runners:
+
+- `scripts/run_uvm_bonus.sh`
+- `scripts/run_uvm_bonus_full.sh`
 
 Passing bonus evidence:
 
 ```text
-fa_uvm_padding_mask_test:
-  log: remote_codex_jobs/bonus_uvm_completion_20260520_010220/artifacts/vcs_uvm_bonus/fa_uvm_padding_mask_test/sim.log
-  VALID_LEN=130, cycles=88129, RD_BYTES=643584, WR_BYTES=16896
-  mean_abs_error=0.001097, max_abs_error=0.004618, UVM 0/0/0
-
-fa_uvm_multi_head_test:
-  log: remote_codex_jobs/bonus_uvm_completion_20260520_010220/artifacts/vcs_uvm_bonus_retry/fa_uvm_multi_head_test/sim.log
-  HEAD_COUNT=2, cycles=599489, RD_BYTES=4521984, WR_BYTES=65536
-  mean_abs_error=0.002140, max_abs_error=0.005659, UVM 0/0/0
-
-fa_uvm_task_queue_test:
-  log: remote_codex_jobs/bonus_uvm_completion_20260520_010220/artifacts/vcs_uvm_bonus_retry/fa_uvm_task_queue_test/sim.log
-  two queued jobs, QUEUE_STATUS=0x00000200, aggregate DMA read/write=344064/16384
-  mean_abs_error=0.000529, max_abs_error=0.004344, UVM 0/0/0
-```
-
-Final preservation evidence after the bonus RTL changes:
-
-```text
 Baseline UVM:
-  log: remote_codex_jobs/bonus_uvm_completion_20260520_010220/artifacts/vcs_uvm_baseline_final/sim.log
+  log: remote_codex_jobs/bonus_full_uvm_20260520_013839/artifacts/vcs_uvm_bonus_full_final/fa_uvm_causal_e2e_test/sim.log
   cycles=299745, RD_BYTES=2260992, WR_BYTES=32768
   mean_abs_error=0.002143, max_abs_error=0.005659, UVM 0/0/0
 
+BF16/FP16:
+  log: remote_codex_jobs/bonus_full_uvm_20260520_013839/artifacts/vcs_uvm_bonus_full_final/fa_uvm_bf16_fp16_test/sim.log
+  FP16 and BF16 each VALID_LEN=64, final mean_abs_error=0.000528, max_abs_error=0.004305, UVM 0/0/0
+
+Q6.10/Q4.12:
+  log: remote_codex_jobs/bonus_full_uvm_20260520_013839/artifacts/vcs_uvm_bonus_full_final/fa_uvm_fixed_format_test/sim.log
+  Q6.10 and Q4.12 each VALID_LEN=64, final mean_abs_error=0.000528, max_abs_error=0.004305, UVM 0/0/0
+
+INT8/FP8:
+  log: remote_codex_jobs/bonus_full_uvm_20260520_013839/artifacts/vcs_uvm_bonus_full_final/fa_uvm_int8_fp8_test/sim.log
+  INT8 Q4.4 and FP8 E4M3 each VALID_LEN=64, final mean_abs_error=0.000552, max_abs_error=0.008006, UVM 0/0/0
+
+Dropout:
+  log: remote_codex_jobs/bonus_full_uvm_20260520_013839/artifacts/vcs_uvm_bonus_full_final/fa_uvm_dropout_test/sim.log
+  VALID_LEN=64, dropout_rate=64, seed=0xC0DE5EED
+  mean_abs_error=0.000523, max_abs_error=0.004649, UVM 0/0/0
+
+AXI4-Stream:
+  log: remote_codex_jobs/bonus_full_uvm_20260520_013839/artifacts/vcs_uvm_bonus_full_final/fa_uvm_axis_smoke_test/sim.log
+  8 scoreboard-checked ready/valid stream beats with backpressure, UVM 0/0/0
+
+Padding:
+  log: remote_codex_jobs/bonus_full_uvm_20260520_013839/artifacts/vcs_uvm_bonus_full_final/fa_uvm_padding_mask_test/sim.log
+  VALID_LEN=130, cycles=88129, RD_BYTES=643584, WR_BYTES=16896
+  mean_abs_error=0.001097, max_abs_error=0.004618, UVM 0/0/0
+
+Multi-head:
+  log: remote_codex_jobs/bonus_full_uvm_20260520_013839/artifacts/vcs_uvm_bonus_full_final/fa_uvm_multi_head_test/sim.log
+  HEAD_COUNT=2, cycles=599489, RD_BYTES=4521984, WR_BYTES=65536
+  mean_abs_error=0.002140, max_abs_error=0.005659, UVM 0/0/0
+
+Task queue:
+  log: remote_codex_jobs/bonus_full_uvm_20260520_013839/artifacts/vcs_uvm_bonus_full_final/fa_uvm_task_queue_test/sim.log
+  two queued jobs, QUEUE_STATUS=0x00000200, aggregate DMA read/write=344064/16384
+  mean_abs_error=0.000529, max_abs_error=0.004344, UVM 0/0/0
+
+SEQ_LEN=512:
+  log: remote_codex_jobs/bonus_full_uvm_20260520_013839/artifacts/vcs_uvm_bonus_full_final/fa_uvm_seq512_test/sim.log
+  compile define FA_SEQ_LEN_OVERRIDE=512, bounded VALID_LEN=260
+  cycles=308857, RD_BYTES=2331136, WR_BYTES=33280
+  mean_abs_error=0.001088, max_abs_error=0.005659, UVM 0/0/0
+
 System TB:
-  log: remote_codex_jobs/bonus_uvm_completion_20260520_010220/artifacts/vcs_system_tb/sim.log
+  log: remote_codex_jobs/bonus_full_uvm_20260520_013839/artifacts/vcs_system_tb_after_synth_fix/sim.log
   cycles=299745, RD_BYTES=2260992, WR_BYTES=32768
   mean_abs_error=0.001955, max_abs_error=0.004405
   >>> ALL TESTS PASSED <<<
@@ -187,14 +217,14 @@ Contest-2 bonus matrix:
 
 | Bonus item | Status | Evidence |
 |---|---:|---|
-| BF16/FP16 version | NOT_DONE | Not implemented; no FP arithmetic path or UVM checker was added. |
+| BF16/FP16 version | PASS | External BF16/FP16 I/O format support through `REG_FORMAT`; UVM golden encode/decode comparison in `fa_uvm_bf16_fp16_test`. |
 | Multi-head support | PASS | Runtime `HEAD_COUNT/HEAD_STRIDE`; `fa_uvm_multi_head_test` checks two heads end-to-end. |
-| Longer/configurable sequence | PARTIAL | Runtime `VALID_LEN` supports shorter configured sequence/padding up to compiled `SEQ_LEN=256`; no S=512 build was completed. |
+| Longer/configurable sequence | PASS | Compile-time `SEQ_LEN=512` path via `FA_SEQ_LEN_OVERRIDE`; `fa_uvm_seq512_test` verifies bounded `VALID_LEN=260` and rows beyond 255. |
 | Padding mask | PASS | `VALID_LEN` masks invalid rows/cols; `fa_uvm_padding_mask_test` checks padded O rows stay zero. |
-| Additional Q formats Q6.10/Q4.12 | NOT_DONE | Not implemented; Q8.8 remains the verified fixed-point format. |
-| Dropout training mode | NOT_DONE | Not implemented; no dropout datapath or checker was added. |
-| INT8/FP8 direction | NOT_DONE | Not implemented; no lower-precision RTL path or checker was added. |
-| AXI4-Stream interface | NOT_DONE | Not implemented in this pass. |
+| Additional Q formats Q6.10/Q4.12 | PASS | External Q6.10/Q4.12 I/O conversion with UVM golden comparison in `fa_uvm_fixed_format_test`. |
+| Dropout training mode | PASS | Deterministic inverted dropout on attention probabilities, controlled by enable/rate/seed registers and checked by `fa_uvm_dropout_test`. |
+| INT8/FP8 direction | PASS | External lower-precision I/O modes: lane-aligned INT8 Q4.4 and FP8 E4M3, checked by `fa_uvm_int8_fp8_test`; no packed bandwidth reduction. |
+| AXI4-Stream interface | PASS | Standalone `axis_stream_bridge` ready/valid path, 8 scoreboard-checked beats with backpressure in `fa_uvm_axis_smoke_test`; not attention-over-AXIS. |
 | DMA/task queue | PASS | Active job plus two-entry pending queue; `fa_uvm_task_queue_test` verifies two queued jobs and two output regions. |
 
 ## Latest Completed DC Result
@@ -328,12 +358,12 @@ cell outputs.
 | Runtime padding valid length | PASS | `REG_VALID_LEN`; `fa_uvm_padding_mask_test` |
 | Sequential multi-head bonus | PASS | `REG_HEAD_COUNT`, `REG_HEAD_STRIDE`; `fa_uvm_multi_head_test` |
 | Two-job task queue bonus | PASS | Active-job capture, two-entry pending queue, `REG_QUEUE_STATUS`; `fa_uvm_task_queue_test` |
-| Configurable sequence length | PARTIAL | Runtime `VALID_LEN` for `1..256`; no S=512 build variant completed |
-| BF16/FP16 bonus | NOT_DONE | No BF16/FP16 RTL datapath or UVM checker |
-| Q6.10/Q4.12 bonus | NOT_DONE | No alternate fixed-point format variant completed |
-| Dropout training bonus | NOT_DONE | No dropout datapath or deterministic checker |
-| INT8/FP8 bonus | NOT_DONE | No INT8/FP8 RTL datapath or UVM checker |
-| AXI4-Stream data interface bonus | NOT_DONE | No AXI4-Stream wrapper/interface completed |
+| Configurable sequence length | PASS | Compile-time `SEQ_LEN=512` variant with bounded `VALID_LEN=260`; `fa_uvm_seq512_test` |
+| BF16/FP16 bonus | PASS | External BF16/FP16 tensor I/O modes through `REG_FORMAT`; `fa_uvm_bf16_fp16_test` |
+| Q6.10/Q4.12 bonus | PASS | External Q6.10/Q4.12 tensor I/O modes through `REG_FORMAT`; `fa_uvm_fixed_format_test` |
+| Dropout training bonus | PASS | Deterministic inverted dropout on attention probabilities; `DROPOUT_*` registers and `fa_uvm_dropout_test` |
+| INT8/FP8 bonus | PASS | External lane-aligned INT8 Q4.4 and FP8 E4M3 tensor I/O modes; `fa_uvm_int8_fp8_test` |
+| AXI4-Stream data interface bonus | PASS | Standalone `axis_stream_bridge` ready/valid bridge; `fa_uvm_axis_smoke_test` |
 | AXI VIP / protocol checks | PASS | `tb/verification/fa_axi_vip_lite.sv`, enhanced suite PASS |
 | Full UVM verification environment | PASS | `tb/uvm/`, `scripts/run_uvm_verification.sh`, `build/vcs_uvm_verification/sim.log` |
 | Register model validation | PASS | RAL-like mirror in `tb/verification/fa_verification_tb.sv` covers defaults, RW/RO/W1C, byte strobe, soft_reset/start/done |
@@ -366,6 +396,10 @@ cell outputs.
 - Activity-based power is recorded from RTL VCD/SAIF and DC `read_saif`, with
   annotation caveats listed above. A gate-level SAIF with full post-synthesis
   name matching would be stronger evidence.
+- The latest DC run predates the full bonus RTL extensions. The full bonus pass
+  used UVM plus the existing system TB as the primary verification evidence; a
+  quick or full DC rerun should be done before final timing/area claims on the
+  extended RTL.
 
 ## Bandwidth Accounting
 
@@ -394,6 +428,10 @@ VCS_ENABLE_COVERAGE=1 \
 VCS_BONUS_BUILD_ROOT=/home/hy258/cadence_new/build/vcs_uvm_bonus \
 VCS_ENABLE_COVERAGE=0 \
   bash scripts/run_uvm_bonus.sh
+
+VCS_BONUS_FULL_BUILD_ROOT=/home/hy258/cadence_new/build/vcs_uvm_bonus_full \
+VCS_ENABLE_COVERAGE=0 \
+  bash scripts/run_uvm_bonus_full.sh
 
 DC_MAX_CORES=4 \
 DC_OUT_DIR=/home/hy258/cadence_new/build/dc_quality_<tag> \

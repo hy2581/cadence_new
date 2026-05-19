@@ -53,6 +53,10 @@ module axi4_lite_slave #(
     output logic [31:0]             reg_valid_len,
     output logic [31:0]             reg_head_count,
     output logic [31:0]             reg_head_stride_bytes,
+    output logic [2:0]              reg_format_mode,
+    output logic                    reg_dropout_en,
+    output logic [7:0]              reg_dropout_rate,
+    output logic [31:0]             reg_dropout_seed,
 
     // Status inputs from datapath
     input  logic                    status_busy,
@@ -84,6 +88,10 @@ module axi4_lite_slave #(
     logic [31:0] r_valid_len;
     logic [31:0] r_head_count;
     logic [31:0] r_head_stride_bytes;
+    logic [31:0] r_format;
+    logic [31:0] r_dropout_ctrl;
+    logic [31:0] r_dropout_rate;
+    logic [31:0] r_dropout_seed;
     logic        r_done_sticky;
 
     // Read state machine
@@ -130,6 +138,10 @@ module axi4_lite_slave #(
             r_valid_len     <= 32'(DEFAULT_VALID_LEN);
             r_head_count    <= 32'(DEFAULT_HEAD_COUNT);
             r_head_stride_bytes <= 32'(DEFAULT_HEAD_STRIDE_BYTES);
+            r_format        <= 32'd0;
+            r_dropout_ctrl  <= 32'd0;
+            r_dropout_rate  <= 32'd0;
+            r_dropout_seed  <= 32'h0000_0001;
             r_done_sticky   <= 1'b0;
             reg_start       <= 1'b0;
             reg_soft_reset  <= 1'b0;
@@ -174,6 +186,10 @@ module axi4_lite_slave #(
                     8'h4C: r_valid_len  <= apply_wstrb(r_valid_len, s_axil_wdata, s_axil_wstrb);
                     8'h50: r_head_count <= apply_wstrb(r_head_count, s_axil_wdata, s_axil_wstrb);
                     8'h54: r_head_stride_bytes <= apply_wstrb(r_head_stride_bytes, s_axil_wdata, s_axil_wstrb);
+                    8'h5C: r_format     <= apply_wstrb(r_format, s_axil_wdata, s_axil_wstrb);
+                    8'h60: r_dropout_ctrl <= apply_wstrb(r_dropout_ctrl, s_axil_wdata, s_axil_wstrb);
+                    8'h64: r_dropout_rate <= apply_wstrb(r_dropout_rate, s_axil_wdata, s_axil_wstrb);
+                    8'h68: r_dropout_seed <= apply_wstrb(r_dropout_seed, s_axil_wdata, s_axil_wstrb);
                     default: ;
                 endcase
             end
@@ -217,6 +233,10 @@ module axi4_lite_slave #(
                     8'h50: rd_data_r <= r_head_count;
                     8'h54: rd_data_r <= r_head_stride_bytes;
                     8'h58: rd_data_r <= {7'd0, queue_overflow, queue_completed_count, queue_pending_count};
+                    8'h5C: rd_data_r <= r_format;
+                    8'h60: rd_data_r <= r_dropout_ctrl;
+                    8'h64: rd_data_r <= r_dropout_rate;
+                    8'h68: rd_data_r <= r_dropout_seed;
                     default: rd_data_r <= 32'hDEADBEEF;
                 endcase
             end
@@ -235,6 +255,10 @@ module axi4_lite_slave #(
     assign reg_valid_len   = r_valid_len;
     assign reg_head_count  = r_head_count;
     assign reg_head_stride_bytes = r_head_stride_bytes;
+    assign reg_format_mode = (r_format[2:0] > 3'd6) ? 3'd0 : r_format[2:0];
+    assign reg_dropout_en  = r_dropout_ctrl[0];
+    assign reg_dropout_rate = (r_dropout_rate[7:0] == 8'hFF) ? 8'hFE : r_dropout_rate[7:0];
+    assign reg_dropout_seed = r_dropout_seed;
 
     // IRQ
     assign irq = r_ctrl[2] & r_done_sticky;

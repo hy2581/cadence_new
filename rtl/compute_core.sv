@@ -31,6 +31,9 @@ module compute_core #(
     // Configuration
     input  logic                          causal_en,
     input  logic [$clog2(SEQ_LEN):0]      valid_len,
+    input  logic                          dropout_en,
+    input  logic [7:0]                    dropout_rate,
+    input  logic [31:0]                   dropout_seed,
     input  logic signed [DATA_WIDTH-1:0]  scale,
     input  logic signed [15:0]            neg_large,
 
@@ -129,7 +132,7 @@ module compute_core #(
     logic signed [DATA_WIDTH-1:0] oa_o_tile [TILE_BR-1:0][HEAD_DIM-1:0];
 
     output_accumulator #(
-        .TILE_BR(TILE_BR), .TILE_BC(TILE_BC), .HEAD_DIM(HEAD_DIM),
+        .SEQ_LEN(SEQ_LEN), .TILE_BR(TILE_BR), .TILE_BC(TILE_BC), .HEAD_DIM(HEAD_DIM),
         .DATA_WIDTH(DATA_WIDTH), .ACC_WIDTH(ACC_WIDTH),
         .EXP_WIDTH(EXP_WIDTH), .FRAC_BITS(FRAC_BITS), .PAR_COLS(PAR_MACS)
     ) u_oa (
@@ -139,6 +142,8 @@ module compute_core #(
         .p_matrix(p_matrix),
         .v_data(oa_v_data), .v_valid(oa_v_valid),
         .rescale(rescale_vals), .l_values(l_new),
+        .dropout_en(dropout_en), .dropout_rate(dropout_rate), .dropout_seed(dropout_seed),
+        .q_tile_idx(q_tile_idx), .kv_tile_idx(kv_tile_idx),
         .o_out(oa_o_tile), .o_valid(o_valid)
     );
 

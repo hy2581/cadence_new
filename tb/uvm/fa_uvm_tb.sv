@@ -22,6 +22,7 @@ module fa_uvm_tb;
     fa_axil_if        axil_if(.clk(clk), .rst_n(rst_n));
     fa_axi4_master_if axi_if(.clk(clk), .rst_n(rst_n));
     fa_mem_access_if  mem_if(.clk(clk));
+    fa_axis_if        axis_if(.clk(clk), .rst_n(rst_n));
 
     flash_attention_top dut (
         .clk(clk),
@@ -112,10 +113,31 @@ module fa_uvm_tb;
     assign axi_if.rid = axi_if.arid;
     assign axi_if.bid = axi_if.awid;
 
+    axis_stream_bridge u_axis_bridge (
+        .clk(clk),
+        .rst_n(rst_n),
+        .s_axis_tdata(axis_if.s_tdata),
+        .s_axis_tkeep(axis_if.s_tkeep),
+        .s_axis_tlast(axis_if.s_tlast),
+        .s_axis_tvalid(axis_if.s_tvalid),
+        .s_axis_tready(axis_if.s_tready),
+        .m_axis_tdata(axis_if.m_tdata),
+        .m_axis_tkeep(axis_if.m_tkeep),
+        .m_axis_tlast(axis_if.m_tlast),
+        .m_axis_tvalid(axis_if.m_tvalid),
+        .m_axis_tready(axis_if.m_tready)
+    );
+
     initial begin
+        axis_if.s_tdata  = '0;
+        axis_if.s_tkeep  = '0;
+        axis_if.s_tlast  = 1'b0;
+        axis_if.s_tvalid = 1'b0;
+        axis_if.m_tready = 1'b0;
         uvm_config_db#(virtual fa_axil_if)::set(null, "*", "axil_vif", axil_if);
         uvm_config_db#(virtual fa_axi4_master_if)::set(null, "*", "axi_vif", axi_if);
         uvm_config_db#(virtual fa_mem_access_if)::set(null, "*", "mem_vif", mem_if);
+        uvm_config_db#(virtual fa_axis_if)::set(null, "*", "axis_vif", axis_if);
         run_test();
     end
 

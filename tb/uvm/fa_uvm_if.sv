@@ -87,3 +87,16 @@ interface fa_mem_access_if(input logic clk);
         mem_rd_en <= 1'b0;
     endtask
 endinterface
+
+interface fa_axis_if(input logic clk, input logic rst_n);
+    logic [127:0] s_tdata;
+    logic [15:0]  s_tkeep;
+    logic         s_tlast;
+    logic         s_tvalid;
+    logic         s_tready;
+    logic [127:0] m_tdata;
+    logic [15:0]  m_tkeep;
+    logic         m_tlast;
+    logic         m_tvalid;
+    logic         m_tready;
+endinterface
