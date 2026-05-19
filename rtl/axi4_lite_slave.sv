@@ -4,7 +4,10 @@
 // ============================================================
 module axi4_lite_slave #(
     parameter ADDR_WIDTH = 8,
-    parameter DATA_WIDTH = 32
+    parameter DATA_WIDTH = 32,
+    parameter DEFAULT_VALID_LEN = 256,
+    parameter DEFAULT_HEAD_COUNT = 1,
+    parameter DEFAULT_HEAD_STRIDE_BYTES = 32768
 )(
     input  logic                    clk,
     input  logic                    rst_n,
@@ -47,13 +50,20 @@ module axi4_lite_slave #(
     output logic [31:0]             reg_stride_bytes,
     output logic signed [15:0]      reg_neg_large,
     output logic signed [15:0]      reg_scale,
+    output logic [31:0]             reg_valid_len,
+    output logic [31:0]             reg_head_count,
+    output logic [31:0]             reg_head_stride_bytes,
 
     // Status inputs from datapath
     input  logic                    status_busy,
     input  logic                    status_done,
+    input  logic                    status_error,
     input  logic [31:0]             cycle_count,
     input  logic [31:0]             rd_bytes,
     input  logic [31:0]             wr_bytes,
+    input  logic [7:0]              queue_pending_count,
+    input  logic [7:0]              queue_completed_count,
+    input  logic                    queue_overflow,
 
     // Interrupt output
     output logic                    irq
@@ -71,6 +81,9 @@ module axi4_lite_slave #(
     logic [31:0] r_stride;
     logic [31:0] r_neg_large;
     logic [31:0] r_scale;
+    logic [31:0] r_valid_len;
+    logic [31:0] r_head_count;
+    logic [31:0] r_head_stride_bytes;
     logic        r_done_sticky;
 
     // Read state machine
@@ -114,6 +127,9 @@ module axi4_lite_slave #(
             r_stride        <= 32'd128;  // default d*2
             r_neg_large     <= 32'hFFFF8000;
             r_scale         <= 32'h00000020;
+            r_valid_len     <= 32'(DEFAULT_VALID_LEN);
+            r_head_count    <= 32'(DEFAULT_HEAD_COUNT);
+            r_head_stride_bytes <= 32'(DEFAULT_HEAD_STRIDE_BYTES);
             r_done_sticky   <= 1'b0;
             reg_start       <= 1'b0;
             reg_soft_reset  <= 1'b0;
@@ -155,6 +171,9 @@ module axi4_lite_slave #(
                     8'h34: r_stride     <= apply_wstrb(r_stride, s_axil_wdata, s_axil_wstrb);
                     8'h38: r_neg_large  <= apply_wstrb(r_neg_large, s_axil_wdata, s_axil_wstrb);
                     8'h3C: r_scale      <= apply_wstrb(r_scale, s_axil_wdata, s_axil_wstrb);
+                    8'h4C: r_valid_len  <= apply_wstrb(r_valid_len, s_axil_wdata, s_axil_wstrb);
+                    8'h50: r_head_count <= apply_wstrb(r_head_count, s_axil_wdata, s_axil_wstrb);
+                    8'h54: r_head_stride_bytes <= apply_wstrb(r_head_stride_bytes, s_axil_wdata, s_axil_wstrb);
                     default: ;
                 endcase
             end
@@ -178,7 +197,7 @@ module axi4_lite_slave #(
                 rd_valid_r <= 1'b1;
                 case (s_axil_araddr)
                     8'h00: rd_data_r <= r_ctrl;
-                    8'h04: rd_data_r <= {29'd0, 1'b0, r_done_sticky, status_busy};
+                    8'h04: rd_data_r <= {29'd0, status_error, r_done_sticky, status_busy};
                     8'h08: rd_data_r <= r_cfg;
                     8'h14: rd_data_r <= r_q_base_l;
                     8'h18: rd_data_r <= r_q_base_h;
@@ -194,6 +213,10 @@ module axi4_lite_slave #(
                     8'h40: rd_data_r <= cycle_count;
                     8'h44: rd_data_r <= rd_bytes;
                     8'h48: rd_data_r <= wr_bytes;
+                    8'h4C: rd_data_r <= r_valid_len;
+                    8'h50: rd_data_r <= r_head_count;
+                    8'h54: rd_data_r <= r_head_stride_bytes;
+                    8'h58: rd_data_r <= {7'd0, queue_overflow, queue_completed_count, queue_pending_count};
                     default: rd_data_r <= 32'hDEADBEEF;
                 endcase
             end
@@ -209,6 +232,9 @@ module axi4_lite_slave #(
     assign reg_stride_bytes = r_stride;
     assign reg_neg_large   = r_neg_large[15:0];
     assign reg_scale       = r_scale[15:0];
+    assign reg_valid_len   = r_valid_len;
+    assign reg_head_count  = r_head_count;
+    assign reg_head_stride_bytes = r_head_stride_bytes;
 
     // IRQ
     assign irq = r_ctrl[2] & r_done_sticky;

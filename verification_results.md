@@ -3,7 +3,7 @@
 This report tracks the RTL against the Contest-2 requirements for the
 `S=256, d=64, batch=1, head=1` FlashAttention accelerator.
 
-Last updated: 2026-05-19 23:34 CST.
+Last updated: 2026-05-20 01:24 CST.
 
 ## Tool Environment
 
@@ -141,6 +141,62 @@ row0_causal:        0.003906
 >>> VERIFICATION COMPLETION TESTS PASSED <<<
 ```
 
+## Contest-2 Bonus UVM Results
+
+This run adds three UVM-verified bonus features while preserving the default
+single-head `S=256, d=64` causal behavior.
+
+Bonus runner:
+`scripts/run_uvm_bonus.sh`
+
+Passing bonus evidence:
+
+```text
+fa_uvm_padding_mask_test:
+  log: remote_codex_jobs/bonus_uvm_completion_20260520_010220/artifacts/vcs_uvm_bonus/fa_uvm_padding_mask_test/sim.log
+  VALID_LEN=130, cycles=88129, RD_BYTES=643584, WR_BYTES=16896
+  mean_abs_error=0.001097, max_abs_error=0.004618, UVM 0/0/0
+
+fa_uvm_multi_head_test:
+  log: remote_codex_jobs/bonus_uvm_completion_20260520_010220/artifacts/vcs_uvm_bonus_retry/fa_uvm_multi_head_test/sim.log
+  HEAD_COUNT=2, cycles=599489, RD_BYTES=4521984, WR_BYTES=65536
+  mean_abs_error=0.002140, max_abs_error=0.005659, UVM 0/0/0
+
+fa_uvm_task_queue_test:
+  log: remote_codex_jobs/bonus_uvm_completion_20260520_010220/artifacts/vcs_uvm_bonus_retry/fa_uvm_task_queue_test/sim.log
+  two queued jobs, QUEUE_STATUS=0x00000200, aggregate DMA read/write=344064/16384
+  mean_abs_error=0.000529, max_abs_error=0.004344, UVM 0/0/0
+```
+
+Final preservation evidence after the bonus RTL changes:
+
+```text
+Baseline UVM:
+  log: remote_codex_jobs/bonus_uvm_completion_20260520_010220/artifacts/vcs_uvm_baseline_final/sim.log
+  cycles=299745, RD_BYTES=2260992, WR_BYTES=32768
+  mean_abs_error=0.002143, max_abs_error=0.005659, UVM 0/0/0
+
+System TB:
+  log: remote_codex_jobs/bonus_uvm_completion_20260520_010220/artifacts/vcs_system_tb/sim.log
+  cycles=299745, RD_BYTES=2260992, WR_BYTES=32768
+  mean_abs_error=0.001955, max_abs_error=0.004405
+  >>> ALL TESTS PASSED <<<
+```
+
+Contest-2 bonus matrix:
+
+| Bonus item | Status | Evidence |
+|---|---:|---|
+| BF16/FP16 version | NOT_DONE | Not implemented; no FP arithmetic path or UVM checker was added. |
+| Multi-head support | PASS | Runtime `HEAD_COUNT/HEAD_STRIDE`; `fa_uvm_multi_head_test` checks two heads end-to-end. |
+| Longer/configurable sequence | PARTIAL | Runtime `VALID_LEN` supports shorter configured sequence/padding up to compiled `SEQ_LEN=256`; no S=512 build was completed. |
+| Padding mask | PASS | `VALID_LEN` masks invalid rows/cols; `fa_uvm_padding_mask_test` checks padded O rows stay zero. |
+| Additional Q formats Q6.10/Q4.12 | NOT_DONE | Not implemented; Q8.8 remains the verified fixed-point format. |
+| Dropout training mode | NOT_DONE | Not implemented; no dropout datapath or checker was added. |
+| INT8/FP8 direction | NOT_DONE | Not implemented; no lower-precision RTL path or checker was added. |
+| AXI4-Stream interface | NOT_DONE | Not implemented in this pass. |
+| DMA/task queue | PASS | Active job plus two-entry pending queue; `fa_uvm_task_queue_test` verifies two queued jobs and two output regions. |
+
 ## Latest Completed DC Result
 
 Latest clean run:
@@ -269,6 +325,15 @@ cell outputs.
 | K/V tiling | PASS | `TILE_BR=4`, `TILE_BC=16`; causal mode prunes unused future K/V tiles |
 | Causal mask | PASS | row-0 causal corner passes in system TB |
 | AXI4-Lite control/status registers | PASS | CTRL/STATUS/CFG/base/stride/NEG_LARGE/SCALE/CYCLES/RD_BYTES/WR_BYTES |
+| Runtime padding valid length | PASS | `REG_VALID_LEN`; `fa_uvm_padding_mask_test` |
+| Sequential multi-head bonus | PASS | `REG_HEAD_COUNT`, `REG_HEAD_STRIDE`; `fa_uvm_multi_head_test` |
+| Two-job task queue bonus | PASS | Active-job capture, two-entry pending queue, `REG_QUEUE_STATUS`; `fa_uvm_task_queue_test` |
+| Configurable sequence length | PARTIAL | Runtime `VALID_LEN` for `1..256`; no S=512 build variant completed |
+| BF16/FP16 bonus | NOT_DONE | No BF16/FP16 RTL datapath or UVM checker |
+| Q6.10/Q4.12 bonus | NOT_DONE | No alternate fixed-point format variant completed |
+| Dropout training bonus | NOT_DONE | No dropout datapath or deterministic checker |
+| INT8/FP8 bonus | NOT_DONE | No INT8/FP8 RTL datapath or UVM checker |
+| AXI4-Stream data interface bonus | NOT_DONE | No AXI4-Stream wrapper/interface completed |
 | AXI VIP / protocol checks | PASS | `tb/verification/fa_axi_vip_lite.sv`, enhanced suite PASS |
 | Full UVM verification environment | PASS | `tb/uvm/`, `scripts/run_uvm_verification.sh`, `build/vcs_uvm_verification/sim.log` |
 | Register model validation | PASS | RAL-like mirror in `tb/verification/fa_verification_tb.sv` covers defaults, RW/RO/W1C, byte strobe, soft_reset/start/done |
@@ -325,6 +390,10 @@ VCS_BUILD_DIR=/home/hy258/cadence_new/build/vcs_quality_<tag> \
 VCS_BUILD_DIR=/home/hy258/cadence_new/build/vcs_verification_completion \
 VCS_ENABLE_COVERAGE=1 \
   bash scripts/run_verification_suite.sh
+
+VCS_BONUS_BUILD_ROOT=/home/hy258/cadence_new/build/vcs_uvm_bonus \
+VCS_ENABLE_COVERAGE=0 \
+  bash scripts/run_uvm_bonus.sh
 
 DC_MAX_CORES=4 \
 DC_OUT_DIR=/home/hy258/cadence_new/build/dc_quality_<tag> \

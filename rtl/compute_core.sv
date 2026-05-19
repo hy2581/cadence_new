@@ -30,6 +30,7 @@ module compute_core #(
 
     // Configuration
     input  logic                          causal_en,
+    input  logic [$clog2(SEQ_LEN):0]      valid_len,
     input  logic signed [DATA_WIDTH-1:0]  scale,
     input  logic signed [15:0]            neg_large,
 
@@ -125,6 +126,7 @@ module compute_core #(
     logic [$clog2(NUM_STEPS):0] oa_v_step;
     logic v_rd_pending;
     logic signed [DATA_WIDTH-1:0] oa_v_data [TILE_BC-1:0][PAR_MACS-1:0];
+    logic signed [DATA_WIDTH-1:0] oa_o_tile [TILE_BR-1:0][HEAD_DIM-1:0];
 
     output_accumulator #(
         .TILE_BR(TILE_BR), .TILE_BC(TILE_BC), .HEAD_DIM(HEAD_DIM),
@@ -137,8 +139,30 @@ module compute_core #(
         .p_matrix(p_matrix),
         .v_data(oa_v_data), .v_valid(oa_v_valid),
         .rescale(rescale_vals), .l_values(l_new),
-        .o_out(o_tile), .o_valid(o_valid)
+        .o_out(oa_o_tile), .o_valid(o_valid)
     );
+
+    function automatic logic [IDX_W:0] effective_valid_len(input logic [IDX_W:0] cfg_valid_len);
+        if (cfg_valid_len == '0 || cfg_valid_len > (IDX_W+1)'(SEQ_LEN))
+            effective_valid_len = (IDX_W+1)'(SEQ_LEN);
+        else
+            effective_valid_len = cfg_valid_len;
+    endfunction
+
+    always_comb begin
+        logic [IDX_W:0] valid_len_eff;
+        valid_len_eff = effective_valid_len(valid_len);
+        for (int r = 0; r < TILE_BR; r++) begin
+            logic [IDX_W:0] abs_row_out;
+            abs_row_out = (IDX_W+1)'(q_tile_idx) * (IDX_W+1)'(TILE_BR) + (IDX_W+1)'(r);
+            for (int d = 0; d < HEAD_DIM; d++) begin
+                if (abs_row_out < valid_len_eff)
+                    o_tile[r][d] = oa_o_tile[r][d];
+                else
+                    o_tile[r][d] = '0;
+            end
+        end
+    end
 
     // Persistent softmax state across KV tiles
     always_ff @(posedge clk or negedge rst_n) begin
@@ -224,11 +248,15 @@ module compute_core #(
                     for (int r = 0; r < TILE_BR; r++) begin
                         for (int c = 0; c < TILE_BC; c++) begin
                             logic mask_bit;
-                            logic [IDX_W-1:0] abs_row, abs_col;
+                            logic [IDX_W:0] abs_row, abs_col;
+                            logic [IDX_W:0] valid_len_eff;
                             logic signed [ACC_WIDTH-1:0] score_next;
-                            abs_row = IDX_W'(q_tile_idx) * TILE_BR + IDX_W'(r);
-                            abs_col = IDX_W'(kv_tile_idx) * TILE_BC + IDX_W'(c);
-                            mask_bit = causal_en & (abs_col > abs_row);
+                            valid_len_eff = effective_valid_len(valid_len);
+                            abs_row = (IDX_W+1)'(q_tile_idx) * (IDX_W+1)'(TILE_BR) + (IDX_W+1)'(r);
+                            abs_col = (IDX_W+1)'(kv_tile_idx) * (IDX_W+1)'(TILE_BC) + (IDX_W+1)'(c);
+                            mask_bit = (abs_row >= valid_len_eff) ||
+                                       (abs_col >= valid_len_eff) ||
+                                       (causal_en & (abs_col > abs_row));
                             if (mask_bit)
                                 score_next = neg_large_score;
                             else

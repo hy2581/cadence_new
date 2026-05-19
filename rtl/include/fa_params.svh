@@ -52,6 +52,10 @@ parameter REG_SCALE        = 8'h3C;
 parameter REG_CYCLES       = 8'h40;
 parameter REG_RD_BYTES     = 8'h44;
 parameter REG_WR_BYTES     = 8'h48;
+parameter REG_VALID_LEN    = 8'h4C;
+parameter REG_HEAD_COUNT   = 8'h50;
+parameter REG_HEAD_STRIDE  = 8'h54;
+parameter REG_QUEUE_STATUS = 8'h58;
 
 // --- CTRL register bits ---
 parameter CTRL_START      = 0;
@@ -70,6 +74,9 @@ parameter CFG_CAUSAL_EN   = 0;
 parameter DEFAULT_STRIDE  = HEAD_DIM * 2;           // d * sizeof(Q8.8)
 parameter DEFAULT_NEG_LARGE = 16'h8000;             // -128.0 in Q8.8
 parameter DEFAULT_SCALE   = 16'h0020;               // 1/8 ≈ 1/√64 in Q8.8
+parameter DEFAULT_VALID_LEN = SEQ_LEN;
+parameter DEFAULT_HEAD_COUNT = 1;
+parameter DEFAULT_HEAD_STRIDE_BYTES = SEQ_LEN * DEFAULT_STRIDE;
 
 // --- Parallelism ---
 parameter PAR_MACS       = 1;     // parallel MACs per dot-product per cycle

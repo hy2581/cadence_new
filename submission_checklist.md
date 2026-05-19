@@ -1,6 +1,6 @@
 # Submission Checklist And Evidence Index
 
-Last updated: 2026-05-19.
+Last updated: 2026-05-20.
 
 ## Source Scope
 
@@ -8,13 +8,18 @@ Last updated: 2026-05-19.
 - Constraints: `constraints/flash_attention.sdc`.
 - Verification TBs: `tb/unit_tb/system_tb.sv`, `tb/unit_tb/axi4_slave_mem.sv`, `tb/verification/fa_verification_tb.sv`, `tb/verification/fa_axi_vip_lite.sv`, `tb/uvm/fa_uvm_if.sv`, `tb/uvm/fa_uvm_pkg.sv`, `tb/uvm/fa_uvm_tb.sv`.
 - Verification plan: `tb/verification/verification_plan.md`.
-- Run scripts: `scripts/run_system_tb.sh`, `scripts/run_verification_suite.sh`, `scripts/run_uvm_verification.sh`, `scripts/run_dc.sh`, `scripts/run_dc.tcl`, `scripts/run_post_synth_sim.sh`, `scripts/normalize_sky130_sdf.py`, `scripts/run_sdf_export.sh`, `scripts/run_sdf_export.tcl`, `scripts/run_power_activity.sh`, `scripts/run_power_activity.tcl`, `scripts/sky130_env.sh`, `scripts/synopsys2025_env.sh`.
+- Run scripts: `scripts/run_system_tb.sh`, `scripts/run_verification_suite.sh`, `scripts/run_uvm_verification.sh`, `scripts/run_uvm_bonus.sh`, `scripts/run_dc.sh`, `scripts/run_dc.tcl`, `scripts/run_post_synth_sim.sh`, `scripts/normalize_sky130_sdf.py`, `scripts/run_sdf_export.sh`, `scripts/run_sdf_export.tcl`, `scripts/run_power_activity.sh`, `scripts/run_power_activity.tcl`, `scripts/sky130_env.sh`, `scripts/synopsys2025_env.sh`.
 
 ## Verification Evidence
 
 - Latest full system PASS: `build/vcs_verification_completion_system/sim.log`.
 - Latest enhanced verification PASS: `build/vcs_verification_completion/sim.log`.
 - Latest full UVM PASS: `build/vcs_uvm_verification/sim.log`.
+- Latest bonus padding UVM PASS: `remote_codex_jobs/bonus_uvm_completion_20260520_010220/artifacts/vcs_uvm_bonus/fa_uvm_padding_mask_test/sim.log`.
+- Latest bonus multi-head UVM PASS: `remote_codex_jobs/bonus_uvm_completion_20260520_010220/artifacts/vcs_uvm_bonus_retry/fa_uvm_multi_head_test/sim.log`.
+- Latest bonus task-queue UVM PASS: `remote_codex_jobs/bonus_uvm_completion_20260520_010220/artifacts/vcs_uvm_bonus_retry/fa_uvm_task_queue_test/sim.log`.
+- Latest post-bonus baseline UVM PASS: `remote_codex_jobs/bonus_uvm_completion_20260520_010220/artifacts/vcs_uvm_baseline_final/sim.log`.
+- Latest post-bonus system TB PASS: `remote_codex_jobs/bonus_uvm_completion_20260520_010220/artifacts/vcs_system_tb/sim.log`.
 - UVM coverage dashboard: `build/vcs_uvm_verification/coverage_report/dashboard.txt`.
 - Existing enhanced non-UVM preservation PASS after UVM addition: `build/vcs_uvm_preserve_verification_suite/sim.log`.
 - Post-completion polish verification PASS: `build/vcs_post_completion_polish/sim.log`.
@@ -41,6 +46,28 @@ reset/register/job sequences, scoreboard, coverage component, env, base test,
 `DMA_Q/K/V=32768/1114112/1114112`, `DMA_O=32768`,
 `mean_abs_error=0.002143`, `max_abs_error=0.005659`,
 `row0_causal=0.003906`, with UVM warnings/errors/fatals `0/0/0`.
+
+Contest-2 bonus UVM status:
+
+| Bonus item | Status | Evidence |
+| --- | ---: | --- |
+| BF16/FP16 version | NOT_DONE | No BF16/FP16 RTL datapath or UVM checker. |
+| Multi-head support | PASS | Runtime `HEAD_COUNT/HEAD_STRIDE`; `fa_uvm_multi_head_test` checks two heads end-to-end. |
+| Longer/configurable sequence | PARTIAL | Runtime `VALID_LEN` supports shorter configured sequence/padding up to compiled `SEQ_LEN=256`; no S=512 build was completed. |
+| Padding mask | PASS | `VALID_LEN` masks invalid rows/cols; `fa_uvm_padding_mask_test` checks padded O rows stay zero. |
+| Additional Q formats Q6.10/Q4.12 | NOT_DONE | Q8.8 remains the verified fixed-point format. |
+| Dropout training mode | NOT_DONE | No dropout datapath or deterministic checker. |
+| INT8/FP8 direction | NOT_DONE | No INT8/FP8 RTL datapath or UVM checker. |
+| AXI4-Stream interface | NOT_DONE | No AXI4-Stream wrapper/interface completed. |
+| DMA/task queue | PASS | Active job plus two-entry pending queue; `fa_uvm_task_queue_test` verifies two queued jobs and output regions. |
+
+Bonus run metrics:
+
+```text
+fa_uvm_padding_mask_test: VALID_LEN=130, cycles=88129, RD_BYTES=643584, WR_BYTES=16896, UVM 0/0/0
+fa_uvm_multi_head_test:   HEAD_COUNT=2, cycles=599489, RD_BYTES=4521984, WR_BYTES=65536, UVM 0/0/0
+fa_uvm_task_queue_test:   QUEUE_STATUS=0x00000200, aggregate DMA read/write=344064/16384, UVM 0/0/0
+```
 
 ## Synthesis Evidence
 
@@ -173,12 +200,19 @@ unannotated sequential cell outputs.
 - UVM verification environment status: `remote_codex_jobs/uvm_verification_env_20260519_232113/status.md`.
 - UVM verification environment final report: `remote_codex_jobs/uvm_verification_env_20260519_232113/final.md`.
 - UVM verification environment patch: `remote_codex_jobs/uvm_verification_env_20260519_232113/artifacts/cadence_new_uvm_verification_env.patch`.
+- Bonus UVM completion status: `remote_codex_jobs/bonus_uvm_completion_20260520_010220/status.md`.
+- Bonus UVM completion final report: `remote_codex_jobs/bonus_uvm_completion_20260520_010220/final.md`.
+- Bonus UVM completion patch: `remote_codex_jobs/bonus_uvm_completion_20260520_010220/artifacts/cadence_new_bonus_uvm_completion.patch`.
 
 ## Remaining Notes
 
 - Build directories are evidence outputs and are not packed by this checklist.
 - Total code coverage is not 100%; the functional coverage groups are 100%.
+- Bonus PASS claims are limited to features with RTL plus UVM scoreboard evidence:
+  padding mask, sequential multi-head, and two-job task queue. Configurable
+  sequence is PARTIAL because only runtime valid lengths up to compiled
+  `SEQ_LEN=256` are verified.
 - The no-SDF gate simulation depends on functional Sky130 HS wrappers plus locally generated helper stubs under the build directory; it is useful evidence of netlist functional equivalence under the system TB.
 - SDF timing GLS now produces passing system metrics with the opt-in normalized SDF/specify overlay. It is not a clean timing signoff run because residual annotation warnings remain (`SDFCOM_SWC`, `SDFCOM_IWSBA`, and `SDFCOM_NDI`), although the async reset/set `SDFCOM_CFTC` and `WSUM` blockers are eliminated.
 - Activity-based power is now recorded from RTL VCD/SAIF and DC `read_saif`, but a fully mapped gate-level SAIF would be stronger evidence.
-- The latest DC run is from the pre-polish RTL/constraint baseline. This polish pass only adds TB/script/documentation changes, so DC was not rerun.
+- The latest DC run predates the bonus RTL extensions. DC was not rerun in this bonus pass because the requested primary deliverable was UVM verification, and the shared RTL was preserved by post-bonus baseline UVM and system TB runs.

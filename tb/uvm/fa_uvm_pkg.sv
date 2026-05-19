@@ -5,13 +5,23 @@ package fa_uvm_pkg;
 
     localparam int FA_SEQ_LEN  = 256;
     localparam int FA_HEAD_DIM = 64;
+    localparam int FA_TILE_BR  = 4;
+    localparam int FA_TILE_BC  = 16;
+    localparam int FA_MAX_HEADS = 2;
+    localparam int FA_MAX_SCOREBOARD_JOBS = 2;
 
     localparam bit [63:0] FA_Q_BASE = 64'h0000_0000_0001_0000;
     localparam bit [63:0] FA_K_BASE = 64'h0000_0000_0002_0000;
     localparam bit [63:0] FA_V_BASE = 64'h0000_0000_0003_0000;
     localparam bit [63:0] FA_O_BASE = 64'h0000_0000_0004_0000;
+    localparam bit [63:0] FA_Q_BASE_JOB1 = 64'h0000_0000_0011_0000;
+    localparam bit [63:0] FA_K_BASE_JOB1 = 64'h0000_0000_0012_0000;
+    localparam bit [63:0] FA_V_BASE_JOB1 = 64'h0000_0000_0013_0000;
+    localparam bit [63:0] FA_O_BASE_JOB1 = 64'h0000_0000_0014_0000;
 
     localparam longint unsigned FA_TENSOR_BYTES        = 32768;
+    localparam longint unsigned FA_TILE_QO_BYTES       = 512;
+    localparam longint unsigned FA_TILE_KV_BYTES       = 2048;
     localparam longint unsigned FA_EXPECT_Q_READ_BYTES = 32768;
     localparam longint unsigned FA_EXPECT_K_READ_BYTES = 1114112;
     localparam longint unsigned FA_EXPECT_V_READ_BYTES = 1114112;
@@ -40,6 +50,10 @@ package fa_uvm_pkg;
     localparam bit [7:0] FA_REG_CYCLES       = 8'h40;
     localparam bit [7:0] FA_REG_RD_BYTES     = 8'h44;
     localparam bit [7:0] FA_REG_WR_BYTES     = 8'h48;
+    localparam bit [7:0] FA_REG_VALID_LEN    = 8'h4C;
+    localparam bit [7:0] FA_REG_HEAD_COUNT   = 8'h50;
+    localparam bit [7:0] FA_REG_HEAD_STRIDE  = 8'h54;
+    localparam bit [7:0] FA_REG_QUEUE_STATUS = 8'h58;
 
     localparam int FA_CTRL_START      = 0;
     localparam int FA_CTRL_SOFT_RESET = 1;
@@ -108,6 +122,10 @@ package fa_uvm_pkg;
         rand bit [31:0] stride_bytes;
         rand bit [31:0] neg_large;
         rand bit [31:0] scale;
+        rand bit [31:0] valid_len;
+        rand bit [31:0] head_count;
+        rand bit [31:0] head_stride_bytes;
+        int unsigned    job_id;
 
         `uvm_object_utils_begin(fa_attention_job_item)
             `uvm_field_int(q_base,       UVM_DEFAULT | UVM_HEX)
@@ -118,6 +136,10 @@ package fa_uvm_pkg;
             `uvm_field_int(stride_bytes, UVM_DEFAULT)
             `uvm_field_int(neg_large,    UVM_DEFAULT | UVM_HEX)
             `uvm_field_int(scale,        UVM_DEFAULT | UVM_HEX)
+            `uvm_field_int(valid_len,    UVM_DEFAULT)
+            `uvm_field_int(head_count,   UVM_DEFAULT)
+            `uvm_field_int(head_stride_bytes, UVM_DEFAULT)
+            `uvm_field_int(job_id,       UVM_DEFAULT)
         `uvm_object_utils_end
 
         function new(string name = "fa_attention_job_item");
@@ -130,6 +152,10 @@ package fa_uvm_pkg;
             stride_bytes = 32'd128;
             neg_large    = 32'h0000_8000;
             scale        = 32'h0000_0020;
+            valid_len    = FA_SEQ_LEN;
+            head_count   = 32'd1;
+            head_stride_bytes = 32'(FA_TENSOR_BYTES);
+            job_id       = 0;
         endfunction
     endclass
 
@@ -724,10 +750,12 @@ package fa_uvm_pkg;
         bit seen_done_clear;
         bit seen_error;
 
-        real q_f[0:FA_SEQ_LEN-1][0:FA_HEAD_DIM-1];
-        real k_f[0:FA_SEQ_LEN-1][0:FA_HEAD_DIM-1];
-        real v_f[0:FA_SEQ_LEN-1][0:FA_HEAD_DIM-1];
-        real golden_o[0:FA_SEQ_LEN-1][0:FA_HEAD_DIM-1];
+        fa_attention_job_item expected_jobs[$];
+
+        real q_f[0:FA_MAX_SCOREBOARD_JOBS-1][0:FA_MAX_HEADS-1][0:FA_SEQ_LEN-1][0:FA_HEAD_DIM-1];
+        real k_f[0:FA_MAX_SCOREBOARD_JOBS-1][0:FA_MAX_HEADS-1][0:FA_SEQ_LEN-1][0:FA_HEAD_DIM-1];
+        real v_f[0:FA_MAX_SCOREBOARD_JOBS-1][0:FA_MAX_HEADS-1][0:FA_SEQ_LEN-1][0:FA_HEAD_DIM-1];
+        real golden_o[0:FA_MAX_SCOREBOARD_JOBS-1][0:FA_MAX_HEADS-1][0:FA_SEQ_LEN-1][0:FA_HEAD_DIM-1];
 
         bit [31:0] last_cycles;
         bit [31:0] last_rd_bytes;
@@ -747,6 +775,147 @@ package fa_uvm_pkg;
             if (!uvm_config_db#(virtual fa_mem_access_if)::get(this, "", "mem_vif", mem_vif))
                 `uvm_fatal("NOVIF", "fa_uvm_scoreboard requires mem_vif")
             reset_dma_stats();
+        endfunction
+
+        function automatic int unsigned valid_len_eff(fa_attention_job_item job);
+            if (job.valid_len == 0 || job.valid_len > FA_SEQ_LEN)
+                valid_len_eff = FA_SEQ_LEN;
+            else
+                valid_len_eff = job.valid_len;
+        endfunction
+
+        function automatic int unsigned head_count_eff(fa_attention_job_item job);
+            int unsigned hc;
+            hc = (job.head_count == 0) ? 1 : job.head_count;
+            if (hc > FA_MAX_HEADS)
+                hc = FA_MAX_HEADS;
+            head_count_eff = hc;
+        endfunction
+
+        function automatic longint unsigned head_stride_eff(fa_attention_job_item job);
+            head_stride_eff = (job.head_stride_bytes == 0) ? FA_TENSOR_BYTES : job.head_stride_bytes;
+        endfunction
+
+        function automatic shortint signed sample_raw(input int kind, input int unsigned job_id,
+                                                       input int head, input int row, input int col);
+            int val;
+            begin
+                case (kind)
+                    0: val = (row * 13 + col * 7  + 3 + head * 19 + job_id * 23) % 64;
+                    1: val = (row * 5  + col * 11 + 9 + head * 17 + job_id * 29) % 64;
+                    default: val = (row * 17 + col * 3 + 1 + head * 13 + job_id * 31) % 64;
+                endcase
+                sample_raw = shortint'(val);
+            end
+        endfunction
+
+        function automatic bit [63:0] tensor_addr(input bit [63:0] base,
+                                                  input longint unsigned head_stride,
+                                                  input int head,
+                                                  input int row,
+                                                  input int col);
+            longint unsigned offset;
+            begin
+                offset = (head_stride * head) + ((row * FA_HEAD_DIM + col) * 2);
+                tensor_addr = base + offset;
+            end
+        endfunction
+
+        function automatic fa_attention_job_item clone_job(fa_attention_job_item job);
+            fa_attention_job_item cloned;
+            cloned = fa_attention_job_item::type_id::create("expected_job");
+            cloned.q_base = job.q_base;
+            cloned.k_base = job.k_base;
+            cloned.v_base = job.v_base;
+            cloned.o_base = job.o_base;
+            cloned.causal_en = job.causal_en;
+            cloned.stride_bytes = job.stride_bytes;
+            cloned.neg_large = job.neg_large;
+            cloned.scale = job.scale;
+            cloned.valid_len = job.valid_len;
+            cloned.head_count = job.head_count;
+            cloned.head_stride_bytes = job.head_stride_bytes;
+            cloned.job_id = job.job_id;
+            clone_job = cloned;
+        endfunction
+
+        function void clear_expected_jobs();
+            expected_jobs.delete();
+        endfunction
+
+        function void add_expected_job(fa_attention_job_item job);
+            if (expected_jobs.size() >= FA_MAX_SCOREBOARD_JOBS)
+                `uvm_fatal("JOBLIST", "Scoreboard expected job capacity exceeded")
+            expected_jobs.push_back(clone_job(job));
+        endfunction
+
+        function automatic int find_expected_region(input bit is_write,
+                                                    input bit [63:0] addr,
+                                                    input longint unsigned bytes);
+            longint unsigned stride;
+            bit [63:0] q0;
+            bit [63:0] k0;
+            bit [63:0] v0;
+            bit [63:0] o0;
+            begin
+                find_expected_region = -1;
+                foreach (expected_jobs[j]) begin
+                    stride = head_stride_eff(expected_jobs[j]);
+                    for (int h = 0; h < head_count_eff(expected_jobs[j]); h++) begin
+                        q0 = expected_jobs[j].q_base + (stride * h);
+                        k0 = expected_jobs[j].k_base + (stride * h);
+                        v0 = expected_jobs[j].v_base + (stride * h);
+                        o0 = expected_jobs[j].o_base + (stride * h);
+                        if (!is_write && addr >= q0 && (addr + bytes) <= (q0 + FA_TENSOR_BYTES))
+                            return 0;
+                        if (!is_write && addr >= k0 && (addr + bytes) <= (k0 + FA_TENSOR_BYTES))
+                            return 1;
+                        if (!is_write && addr >= v0 && (addr + bytes) <= (v0 + FA_TENSOR_BYTES))
+                            return 2;
+                        if (is_write && addr >= o0 && (addr + bytes) <= (o0 + FA_TENSOR_BYTES))
+                            return 3;
+                    end
+                end
+            end
+        endfunction
+
+        function void expected_dma_totals(output longint unsigned q_bytes,
+                                          output longint unsigned k_bytes,
+                                          output longint unsigned v_bytes,
+                                          output longint unsigned o_bytes,
+                                          output longint unsigned rd_bytes,
+                                          output longint unsigned wr_bytes);
+            int unsigned valid_len_local;
+            int unsigned q_tiles;
+            int unsigned max_kv;
+            int unsigned q_last;
+            begin
+                q_bytes = 0;
+                k_bytes = 0;
+                v_bytes = 0;
+                o_bytes = 0;
+                foreach (expected_jobs[j]) begin
+                    valid_len_local = valid_len_eff(expected_jobs[j]);
+                    q_tiles = (valid_len_local + FA_TILE_BR - 1) / FA_TILE_BR;
+                    for (int h = 0; h < head_count_eff(expected_jobs[j]); h++) begin
+                        q_bytes += q_tiles * FA_TILE_QO_BYTES;
+                        o_bytes += q_tiles * FA_TILE_QO_BYTES;
+                        for (int qt = 0; qt < q_tiles; qt++) begin
+                            q_last = qt * FA_TILE_BR + (FA_TILE_BR - 1);
+                            if (q_last >= valid_len_local)
+                                q_last = valid_len_local - 1;
+                            if (expected_jobs[j].causal_en)
+                                max_kv = q_last / FA_TILE_BC;
+                            else
+                                max_kv = ((valid_len_local + FA_TILE_BC - 1) / FA_TILE_BC) - 1;
+                            k_bytes += (max_kv + 1) * FA_TILE_KV_BYTES;
+                            v_bytes += (max_kv + 1) * FA_TILE_KV_BYTES;
+                        end
+                    end
+                end
+                rd_bytes = q_bytes + k_bytes + v_bytes;
+                wr_bytes = o_bytes;
+            end
         endfunction
 
         function void write_axil(fa_axil_reg_item tr);
@@ -769,7 +938,7 @@ package fa_uvm_pkg;
 
         function void write_dma(fa_axi_dma_item tr);
             int region;
-            region = fa_dma_region(tr.is_write, tr.addr, tr.bytes);
+            region = find_expected_region(tr.is_write, tr.addr, tr.bytes);
 
             if (region < 0) begin
                 `uvm_fatal("DMARANGE", $sformatf("DMA range outside expected tensors is_write=%0d addr=0x%016h bytes=%0d",
@@ -806,75 +975,100 @@ package fa_uvm_pkg;
         endfunction
 
         task load_vectors_and_compute_golden(bit causal);
+            fa_attention_job_item default_job;
+            default_job = fa_attention_job_item::type_id::create("default_job");
+            default_job.causal_en = causal;
+            clear_expected_jobs();
+            add_expected_job(default_job);
+            load_job_vectors_and_compute_golden(default_job, 0);
+        endtask
+
+        task load_job_vectors_and_compute_golden(fa_attention_job_item job, int job_slot = 0);
             shortint signed q_raw;
             shortint signed k_raw;
             shortint signed v_raw;
+            longint unsigned stride;
 
-            `uvm_info("DATA", "Loading deterministic Q/K/V vectors through memory access interface", UVM_LOW)
-            for (int i = 0; i < FA_SEQ_LEN; i++) begin
-                for (int j = 0; j < FA_HEAD_DIM; j++) begin
-                    q_raw = shortint'((i * 13 + j * 7 + 3) % 64);
-                    k_raw = shortint'((i * 5  + j * 11 + 9) % 64);
-                    v_raw = shortint'((i * 17 + j * 3 + 1) % 64);
-                    q_f[i][j] = $itor(q_raw) / 256.0;
-                    k_f[i][j] = $itor(k_raw) / 256.0;
-                    v_f[i][j] = $itor(v_raw) / 256.0;
-                    mem_vif.write16(FA_Q_BASE + ((i * FA_HEAD_DIM + j) * 2), q_raw[15:0]);
-                    mem_vif.write16(FA_K_BASE + ((i * FA_HEAD_DIM + j) * 2), k_raw[15:0]);
-                    mem_vif.write16(FA_V_BASE + ((i * FA_HEAD_DIM + j) * 2), v_raw[15:0]);
+            `uvm_info("DATA", $sformatf("Loading job_id=%0d heads=%0d valid_len=%0d",
+                job.job_id, head_count_eff(job), valid_len_eff(job)), UVM_LOW)
+            stride = head_stride_eff(job);
+            for (int h = 0; h < head_count_eff(job); h++) begin
+                for (int i = 0; i < FA_SEQ_LEN; i++) begin
+                    for (int j = 0; j < FA_HEAD_DIM; j++) begin
+                        q_raw = sample_raw(0, job.job_id, h, i, j);
+                        k_raw = sample_raw(1, job.job_id, h, i, j);
+                        v_raw = sample_raw(2, job.job_id, h, i, j);
+                        q_f[job_slot][h][i][j] = $itor(q_raw) / 256.0;
+                        k_f[job_slot][h][i][j] = $itor(k_raw) / 256.0;
+                        v_f[job_slot][h][i][j] = $itor(v_raw) / 256.0;
+                        mem_vif.write16(tensor_addr(job.q_base, stride, h, i, j), q_raw[15:0]);
+                        mem_vif.write16(tensor_addr(job.k_base, stride, h, i, j), k_raw[15:0]);
+                        mem_vif.write16(tensor_addr(job.v_base, stride, h, i, j), v_raw[15:0]);
+                        mem_vif.write16(tensor_addr(job.o_base, stride, h, i, j), 16'h0000);
+                    end
                 end
+                compute_golden_for_head(job, h, job_slot);
             end
-
-            compute_golden(causal);
         endtask
 
         task compute_golden(bit causal);
+            fa_attention_job_item default_job;
+            default_job = fa_attention_job_item::type_id::create("default_golden_job");
+            default_job.causal_en = causal;
+            compute_golden_for_head(default_job, 0, 0);
+        endtask
+
+        task compute_golden_for_head(fa_attention_job_item job, int head, int job_slot = 0);
             real s_val;
             real row_max;
             real row_sum;
             real p_val;
             real scale;
+            int unsigned valid_len_local;
 
             `uvm_info("GOLDEN", "Computing FP32 scaled dot-product attention golden model", UVM_LOW)
             scale = 1.0 / $sqrt(64.0);
+            valid_len_local = valid_len_eff(job);
             for (int i = 0; i < FA_SEQ_LEN; i++) begin
+                for (int k = 0; k < FA_HEAD_DIM; k++)
+                    golden_o[job_slot][head][i][k] = 0.0;
+                if (i >= valid_len_local)
+                    continue;
+
                 row_max = -1e30;
-                for (int j = 0; j < FA_SEQ_LEN; j++) begin
+                for (int j = 0; j < valid_len_local; j++) begin
                     s_val = 0.0;
                     for (int k = 0; k < FA_HEAD_DIM; k++)
-                        s_val += q_f[i][k] * k_f[j][k];
+                        s_val += q_f[job_slot][head][i][k] * k_f[job_slot][head][j][k];
                     s_val *= scale;
-                    if (causal && j > i)
+                    if (job.causal_en && j > i)
                         s_val = -1e9;
                     if (s_val > row_max)
                         row_max = s_val;
                 end
 
                 row_sum = 0.0;
-                for (int j = 0; j < FA_SEQ_LEN; j++) begin
+                for (int j = 0; j < valid_len_local; j++) begin
                     s_val = 0.0;
                     for (int k = 0; k < FA_HEAD_DIM; k++)
-                        s_val += q_f[i][k] * k_f[j][k];
+                        s_val += q_f[job_slot][head][i][k] * k_f[job_slot][head][j][k];
                     s_val *= scale;
-                    if (causal && j > i)
+                    if (job.causal_en && j > i)
                         s_val = -1e9;
                     p_val = $exp(s_val - row_max);
                     row_sum += p_val;
                 end
 
-                for (int k = 0; k < FA_HEAD_DIM; k++)
-                    golden_o[i][k] = 0.0;
-
-                for (int j = 0; j < FA_SEQ_LEN; j++) begin
+                for (int j = 0; j < valid_len_local; j++) begin
                     s_val = 0.0;
                     for (int k = 0; k < FA_HEAD_DIM; k++)
-                        s_val += q_f[i][k] * k_f[j][k];
+                        s_val += q_f[job_slot][head][i][k] * k_f[job_slot][head][j][k];
                     s_val *= scale;
-                    if (causal && j > i)
+                    if (job.causal_en && j > i)
                         s_val = -1e9;
                     p_val = $exp(s_val - row_max) / row_sum;
                     for (int k = 0; k < FA_HEAD_DIM; k++)
-                        golden_o[i][k] += p_val * v_f[j][k];
+                        golden_o[job_slot][head][i][k] += p_val * v_f[job_slot][head][j][k];
                 end
             end
         endtask
@@ -886,6 +1080,14 @@ package fa_uvm_pkg;
             input bit [31:0] rd_bytes_val,
             input bit [31:0] wr_bytes_val
         );
+            longint unsigned exp_q;
+            longint unsigned exp_k;
+            longint unsigned exp_v;
+            longint unsigned exp_o;
+            longint unsigned exp_rd;
+            longint unsigned exp_wr;
+            int unsigned cycle_limit;
+
             if (!status_val[FA_STATUS_DONE])
                 `uvm_fatal("STATUS", $sformatf("STATUS.DONE was not set, STATUS=0x%08h", status_val))
             if (status_val[FA_STATUS_ERROR])
@@ -899,12 +1101,16 @@ package fa_uvm_pkg;
             last_rd_bytes = rd_bytes_val;
             last_wr_bytes = wr_bytes_val;
 
-            if (cycles_val >= 32'd300000)
-                `uvm_fatal("PERF", $sformatf("CYCLES=%0d, expected < 300000", cycles_val))
-            if (rd_bytes_val != FA_EXPECT_RD_BYTES[31:0])
-                `uvm_fatal("BYTES", $sformatf("RD_BYTES=%0d, expected %0d", rd_bytes_val, FA_EXPECT_RD_BYTES))
-            if (wr_bytes_val != FA_EXPECT_WR_BYTES[31:0])
-                `uvm_fatal("BYTES", $sformatf("WR_BYTES=%0d, expected %0d", wr_bytes_val, FA_EXPECT_WR_BYTES))
+            expected_dma_totals(exp_q, exp_k, exp_v, exp_o, exp_rd, exp_wr);
+            cycle_limit = 300000;
+            if (expected_jobs.size() != 0)
+                cycle_limit = 300000 * head_count_eff(expected_jobs[0]);
+            if (cycles_val >= cycle_limit)
+                `uvm_fatal("PERF", $sformatf("CYCLES=%0d, expected < %0d", cycles_val, cycle_limit))
+            if (rd_bytes_val != exp_rd[31:0])
+                `uvm_fatal("BYTES", $sformatf("RD_BYTES=%0d, expected %0d", rd_bytes_val, exp_rd))
+            if (wr_bytes_val != exp_wr[31:0])
+                `uvm_fatal("BYTES", $sformatf("WR_BYTES=%0d, expected %0d", wr_bytes_val, exp_wr))
         endtask
 
         task check_outputs_and_dma();
@@ -915,6 +1121,7 @@ package fa_uvm_pkg;
             real abs_err;
             real row0_abs_err;
             int err_count;
+            longint unsigned stride;
 
             `uvm_info("CHECK", "Reading O memory and comparing against golden model", UVM_LOW)
             last_mean_err = 0.0;
@@ -922,27 +1129,32 @@ package fa_uvm_pkg;
             last_row0_causal_err = 0.0;
             err_count = 0;
 
-            for (int i = 0; i < FA_SEQ_LEN; i++) begin
-                for (int j = 0; j < FA_HEAD_DIM; j++) begin
-                    mem_vif.read16(FA_O_BASE + ((i * FA_HEAD_DIM + j) * 2), raw_o);
-                    o_val = shortint'(raw_o);
-                    dut_val = $itor(o_val) / 256.0;
-                    gold_val = golden_o[i][j];
-                    abs_err = dut_val - gold_val;
-                    if (abs_err < 0.0)
-                        abs_err = -abs_err;
-                    last_mean_err += abs_err;
-                    if (abs_err > last_max_err)
-                        last_max_err = abs_err;
+            foreach (expected_jobs[job_idx]) begin
+                stride = head_stride_eff(expected_jobs[job_idx]);
+                for (int h = 0; h < head_count_eff(expected_jobs[job_idx]); h++) begin
+                    for (int i = 0; i < FA_SEQ_LEN; i++) begin
+                        for (int j = 0; j < FA_HEAD_DIM; j++) begin
+                            mem_vif.read16(tensor_addr(expected_jobs[job_idx].o_base, stride, h, i, j), raw_o);
+                            o_val = shortint'(raw_o);
+                            dut_val = $itor(o_val) / 256.0;
+                            gold_val = golden_o[job_idx][h][i][j];
+                            abs_err = dut_val - gold_val;
+                            if (abs_err < 0.0)
+                                abs_err = -abs_err;
+                            last_mean_err += abs_err;
+                            if (abs_err > last_max_err)
+                                last_max_err = abs_err;
 
-                    if (i == 0) begin
-                        row0_abs_err = dut_val - v_f[0][j];
-                        if (row0_abs_err < 0.0)
-                            row0_abs_err = -row0_abs_err;
-                        if (row0_abs_err > last_row0_causal_err)
-                            last_row0_causal_err = row0_abs_err;
+                            if (expected_jobs[job_idx].causal_en && i == 0) begin
+                                row0_abs_err = dut_val - v_f[job_idx][h][0][j];
+                                if (row0_abs_err < 0.0)
+                                    row0_abs_err = -row0_abs_err;
+                                if (row0_abs_err > last_row0_causal_err)
+                                    last_row0_causal_err = row0_abs_err;
+                            end
+                            err_count++;
+                        end
                     end
-                    err_count++;
                 end
             end
 
@@ -960,18 +1172,25 @@ package fa_uvm_pkg;
         endtask
 
         function void check_dma_totals();
-            if (dma_q_read_bytes != FA_EXPECT_Q_READ_BYTES)
-                `uvm_fatal("DMA", $sformatf("Q read bytes=%0d, expected %0d", dma_q_read_bytes, FA_EXPECT_Q_READ_BYTES))
-            if (dma_k_read_bytes != FA_EXPECT_K_READ_BYTES)
-                `uvm_fatal("DMA", $sformatf("K read bytes=%0d, expected %0d", dma_k_read_bytes, FA_EXPECT_K_READ_BYTES))
-            if (dma_v_read_bytes != FA_EXPECT_V_READ_BYTES)
-                `uvm_fatal("DMA", $sformatf("V read bytes=%0d, expected %0d", dma_v_read_bytes, FA_EXPECT_V_READ_BYTES))
-            if (dma_o_write_bytes != FA_EXPECT_O_WR_BYTES)
-                `uvm_fatal("DMA", $sformatf("O write bytes=%0d, expected %0d", dma_o_write_bytes, FA_EXPECT_O_WR_BYTES))
-            if (dma_total_read_bytes != FA_EXPECT_RD_BYTES)
-                `uvm_fatal("DMA", $sformatf("Total DMA read bytes=%0d, expected %0d", dma_total_read_bytes, FA_EXPECT_RD_BYTES))
-            if (dma_total_write_bytes != FA_EXPECT_WR_BYTES)
-                `uvm_fatal("DMA", $sformatf("Total DMA write bytes=%0d, expected %0d", dma_total_write_bytes, FA_EXPECT_WR_BYTES))
+            longint unsigned exp_q;
+            longint unsigned exp_k;
+            longint unsigned exp_v;
+            longint unsigned exp_o;
+            longint unsigned exp_rd;
+            longint unsigned exp_wr;
+            expected_dma_totals(exp_q, exp_k, exp_v, exp_o, exp_rd, exp_wr);
+            if (dma_q_read_bytes != exp_q)
+                `uvm_fatal("DMA", $sformatf("Q read bytes=%0d, expected %0d", dma_q_read_bytes, exp_q))
+            if (dma_k_read_bytes != exp_k)
+                `uvm_fatal("DMA", $sformatf("K read bytes=%0d, expected %0d", dma_k_read_bytes, exp_k))
+            if (dma_v_read_bytes != exp_v)
+                `uvm_fatal("DMA", $sformatf("V read bytes=%0d, expected %0d", dma_v_read_bytes, exp_v))
+            if (dma_o_write_bytes != exp_o)
+                `uvm_fatal("DMA", $sformatf("O write bytes=%0d, expected %0d", dma_o_write_bytes, exp_o))
+            if (dma_total_read_bytes != exp_rd)
+                `uvm_fatal("DMA", $sformatf("Total DMA read bytes=%0d, expected %0d", dma_total_read_bytes, exp_rd))
+            if (dma_total_write_bytes != exp_wr)
+                `uvm_fatal("DMA", $sformatf("Total DMA write bytes=%0d, expected %0d", dma_total_write_bytes, exp_wr))
         endfunction
 
         function void report_phase(uvm_phase phase);
@@ -1015,6 +1234,10 @@ package fa_uvm_pkg;
                 bins cycles     = {FA_REG_CYCLES};
                 bins rd_bytes   = {FA_REG_RD_BYTES};
                 bins wr_bytes   = {FA_REG_WR_BYTES};
+                bins valid_len  = {FA_REG_VALID_LEN};
+                bins head_count = {FA_REG_HEAD_COUNT};
+                bins head_stride = {FA_REG_HEAD_STRIDE};
+                bins queue_status = {FA_REG_QUEUE_STATUS};
             }
             cp_strb: coverpoint strb iff (is_write) {
                 bins full     = {4'hF};
@@ -1035,6 +1258,9 @@ package fa_uvm_pkg;
                 bins done_clear = {4};
                 bins causal     = {5};
                 bins error_free = {6};
+                bins padding    = {7};
+                bins multi_head = {8};
+                bins queue      = {9};
             }
         endgroup
 
@@ -1076,7 +1302,8 @@ package fa_uvm_pkg;
             option.per_instance = 1;
             cp_cycles: coverpoint cycles {
                 bins under_300k = {[0:299999]};
-                illegal_bins over_300k = {[300000:$]};
+                bins under_600k = {[300000:599999]};
+                bins over_600k = {[600000:$]};
             }
             cp_mean: coverpoint mean_bucket {
                 bins pass = {0};
@@ -1113,6 +1340,12 @@ package fa_uvm_pkg;
                 flow_cg.sample(4);
             if (tr.write && tr.addr == FA_REG_CFG && tr.data[FA_CFG_CAUSAL_EN])
                 flow_cg.sample(5);
+            if (tr.write && tr.addr == FA_REG_VALID_LEN && tr.data != FA_SEQ_LEN)
+                flow_cg.sample(7);
+            if (tr.write && tr.addr == FA_REG_HEAD_COUNT && tr.data > 1)
+                flow_cg.sample(8);
+            if (!tr.write && tr.addr == FA_REG_QUEUE_STATUS && tr.rdata[15:8] >= 2)
+                flow_cg.sample(9);
             if (!tr.write && tr.addr == FA_REG_STATUS) begin
                 if (tr.rdata[FA_STATUS_BUSY])
                     flow_cg.sample(2);
@@ -1230,6 +1463,24 @@ package fa_uvm_pkg;
                 `uvm_fatal("REGCHECK", $sformatf("%s failed addr=0x%02h actual=0x%08h expected=0x%08h",
                     name, addr, actual, expected))
         endtask
+
+        task automatic program_attention_job(input fa_attention_job_item job);
+            axil_write(FA_REG_Q_BASE_L, job.q_base[31:0]);
+            axil_write(FA_REG_Q_BASE_H, job.q_base[63:32]);
+            axil_write(FA_REG_K_BASE_L, job.k_base[31:0]);
+            axil_write(FA_REG_K_BASE_H, job.k_base[63:32]);
+            axil_write(FA_REG_V_BASE_L, job.v_base[31:0]);
+            axil_write(FA_REG_V_BASE_H, job.v_base[63:32]);
+            axil_write(FA_REG_O_BASE_L, job.o_base[31:0]);
+            axil_write(FA_REG_O_BASE_H, job.o_base[63:32]);
+            axil_write(FA_REG_STRIDE_BYTES, job.stride_bytes);
+            axil_write(FA_REG_NEG_LARGE, job.neg_large);
+            axil_write(FA_REG_SCALE, job.scale);
+            axil_write(FA_REG_VALID_LEN, job.valid_len);
+            axil_write(FA_REG_HEAD_COUNT, job.head_count);
+            axil_write(FA_REG_HEAD_STRIDE, job.head_stride_bytes);
+            axil_write(FA_REG_CFG, {31'd0, job.causal_en});
+        endtask
     endclass
 
     class fa_uvm_reg_sequence extends fa_axil_base_sequence;
@@ -1260,6 +1511,10 @@ package fa_uvm_pkg;
             axil_read_check(FA_REG_CYCLES,       32'h0000_0000, "CYCLES reset");
             axil_read_check(FA_REG_RD_BYTES,     32'h0000_0000, "RD_BYTES reset");
             axil_read_check(FA_REG_WR_BYTES,     32'h0000_0000, "WR_BYTES reset");
+            axil_read_check(FA_REG_VALID_LEN,    32'd256,       "VALID_LEN reset");
+            axil_read_check(FA_REG_HEAD_COUNT,   32'd1,         "HEAD_COUNT reset");
+            axil_read_check(FA_REG_HEAD_STRIDE,  32'd32768,     "HEAD_STRIDE reset");
+            axil_read_check(FA_REG_QUEUE_STATUS, 32'h0000_0000, "QUEUE_STATUS reset");
 
             axil_write(FA_REG_CFG, 32'h0000_0001);
             axil_read_check(FA_REG_CFG, 32'h0000_0001, "CFG causal write");
@@ -1275,6 +1530,12 @@ package fa_uvm_pkg;
             axil_read_check(FA_REG_SCALE, 32'h0000_0020, "SCALE write");
             axil_write(FA_REG_SCALE, 32'h0000_0021, 4'h1);
             axil_read_check(FA_REG_SCALE, 32'h0000_0021, "SCALE byte0 strobe");
+            axil_write(FA_REG_VALID_LEN, 32'd130);
+            axil_read_check(FA_REG_VALID_LEN, 32'd130, "VALID_LEN write");
+            axil_write(FA_REG_HEAD_COUNT, 32'd2);
+            axil_read_check(FA_REG_HEAD_COUNT, 32'd2, "HEAD_COUNT write");
+            axil_write(FA_REG_HEAD_STRIDE, 32'd32768);
+            axil_read_check(FA_REG_HEAD_STRIDE, 32'd32768, "HEAD_STRIDE write");
 
             axil_write(FA_REG_CYCLES, 32'hDEAD_BEEF);
             axil_read_check(FA_REG_CYCLES, 32'h0000_0000, "CYCLES RO write ignored");
@@ -1319,21 +1580,12 @@ package fa_uvm_pkg;
                 `uvm_fatal("NOENV", "fa_uvm_attention_job_sequence requires env handle")
 
             env.scoreboard.reset_dma_stats();
-            env.scoreboard.load_vectors_and_compute_golden(job.causal_en);
+            env.scoreboard.clear_expected_jobs();
+            env.scoreboard.add_expected_job(job);
+            env.scoreboard.load_job_vectors_and_compute_golden(job, 0);
 
             `uvm_info("JOBSEQ", "Programming attention job registers", UVM_LOW)
-            axil_write(FA_REG_Q_BASE_L, job.q_base[31:0]);
-            axil_write(FA_REG_Q_BASE_H, job.q_base[63:32]);
-            axil_write(FA_REG_K_BASE_L, job.k_base[31:0]);
-            axil_write(FA_REG_K_BASE_H, job.k_base[63:32]);
-            axil_write(FA_REG_V_BASE_L, job.v_base[31:0]);
-            axil_write(FA_REG_V_BASE_H, job.v_base[63:32]);
-            axil_write(FA_REG_O_BASE_L, job.o_base[31:0]);
-            axil_write(FA_REG_O_BASE_H, job.o_base[63:32]);
-            axil_write(FA_REG_STRIDE_BYTES, job.stride_bytes);
-            axil_write(FA_REG_NEG_LARGE, job.neg_large);
-            axil_write(FA_REG_SCALE, job.scale);
-            axil_write(FA_REG_CFG, {31'd0, job.causal_en});
+            program_attention_job(job);
 
             `uvm_info("JOBSEQ", "Starting DUT and polling STATUS.DONE", UVM_LOW)
             axil_write(FA_REG_CTRL, 32'h0000_0001);
@@ -1407,6 +1659,126 @@ package fa_uvm_pkg;
         endtask
     endclass
 
+    class fa_uvm_bonus_job_sequence extends fa_axil_base_sequence;
+        `uvm_object_utils(fa_uvm_bonus_job_sequence)
+
+        fa_uvm_env env;
+        fa_attention_job_item job;
+
+        function new(string name = "fa_uvm_bonus_job_sequence");
+            super.new(name);
+            job = fa_attention_job_item::type_id::create("job");
+        endfunction
+
+        task body();
+            fa_uvm_attention_job_sequence job_seq;
+            if (env == null)
+                `uvm_fatal("NOENV", "fa_uvm_bonus_job_sequence requires env handle")
+            wait (env.axil_vif.rst_n === 1'b1);
+            repeat (10) @(posedge env.axil_vif.clk);
+            job_seq = fa_uvm_attention_job_sequence::type_id::create("job_seq");
+            job_seq.env = env;
+            job_seq.job = job;
+            job_seq.start(m_sequencer);
+        endtask
+    endclass
+
+    class fa_uvm_task_queue_sequence extends fa_axil_base_sequence;
+        `uvm_object_utils(fa_uvm_task_queue_sequence)
+
+        fa_uvm_env env;
+
+        function new(string name = "fa_uvm_task_queue_sequence");
+            super.new(name);
+        endfunction
+
+        task body();
+            fa_attention_job_item job0;
+            fa_attention_job_item job1;
+            bit [31:0] status_val;
+            bit [31:0] queue_status;
+            bit [31:0] cycles_val;
+            bit [31:0] rd_bytes_val;
+            bit [31:0] wr_bytes_val;
+            int timeout_cnt;
+            bit busy_seen;
+
+            if (env == null)
+                `uvm_fatal("NOENV", "fa_uvm_task_queue_sequence requires env handle")
+            wait (env.axil_vif.rst_n === 1'b1);
+            repeat (10) @(posedge env.axil_vif.clk);
+
+            job0 = fa_attention_job_item::type_id::create("job0");
+            job1 = fa_attention_job_item::type_id::create("job1");
+            job0.valid_len = 32'd64;
+            job0.job_id = 0;
+            job1.q_base = FA_Q_BASE_JOB1;
+            job1.k_base = FA_K_BASE_JOB1;
+            job1.v_base = FA_V_BASE_JOB1;
+            job1.o_base = FA_O_BASE_JOB1;
+            job1.valid_len = 32'd64;
+            job1.job_id = 1;
+
+            env.scoreboard.reset_dma_stats();
+            env.scoreboard.clear_expected_jobs();
+            env.scoreboard.add_expected_job(job0);
+            env.scoreboard.add_expected_job(job1);
+            env.scoreboard.load_job_vectors_and_compute_golden(job0, 0);
+            env.scoreboard.load_job_vectors_and_compute_golden(job1, 1);
+
+            `uvm_info("QUEUESEQ", "Starting job0, then enqueueing job1 while DUT is busy", UVM_LOW)
+            program_attention_job(job0);
+            axil_write(FA_REG_CTRL, 32'h0000_0001);
+
+            busy_seen = 1'b0;
+            for (int i = 0; i < 20; i++) begin
+                repeat (20) @(posedge env.axil_vif.clk);
+                axil_read(FA_REG_STATUS, status_val);
+                if (status_val[FA_STATUS_BUSY])
+                    busy_seen = 1'b1;
+            end
+            if (!busy_seen)
+                `uvm_fatal("QUEUE", "Job0 did not enter BUSY before enqueue attempt")
+
+            program_attention_job(job1);
+            axil_write(FA_REG_CTRL, 32'h0000_0001);
+
+            timeout_cnt = 0;
+            queue_status = 32'h0;
+            while (queue_status[15:8] < 8'd2 && timeout_cnt < 1000000) begin
+                repeat (100) @(posedge env.axil_vif.clk);
+                axil_read(FA_REG_QUEUE_STATUS, queue_status);
+                axil_read(FA_REG_STATUS, status_val);
+                if (status_val[FA_STATUS_ERROR])
+                    `uvm_fatal("QUEUE", $sformatf("STATUS.ERROR set during queue run STATUS=0x%08h QSTAT=0x%08h",
+                        status_val, queue_status))
+                timeout_cnt += 100;
+            end
+            if (queue_status[15:8] < 8'd2)
+                `uvm_fatal("QUEUE", $sformatf("Timed out waiting for two completed jobs, QUEUE_STATUS=0x%08h",
+                    queue_status))
+
+            axil_read(FA_REG_CYCLES, cycles_val);
+            axil_read(FA_REG_RD_BYTES, rd_bytes_val);
+            axil_read(FA_REG_WR_BYTES, wr_bytes_val);
+            env.scoreboard.last_cycles = cycles_val;
+            env.scoreboard.last_rd_bytes = rd_bytes_val;
+            env.scoreboard.last_wr_bytes = wr_bytes_val;
+            env.scoreboard.check_outputs_and_dma();
+            env.coverage.sample_perf(cycles_val,
+                env.scoreboard.last_mean_err,
+                env.scoreboard.last_max_err,
+                env.scoreboard.last_row0_causal_err);
+
+            axil_write(FA_REG_STATUS, 32'h0000_0002);
+            `uvm_info("QUEUESEQ", $sformatf(
+                "UVM task queue PASS queue_status=0x%08h aggregate_dma_rd=%0d aggregate_dma_wr=%0d mean_abs_error=%0.6f max_abs_error=%0.6f",
+                queue_status, env.scoreboard.dma_total_read_bytes,
+                env.scoreboard.dma_total_write_bytes,
+                env.scoreboard.last_mean_err, env.scoreboard.last_max_err), UVM_NONE)
+        endtask
+    endclass
+
     class fa_uvm_base_test extends uvm_test;
         `uvm_component_utils(fa_uvm_base_test)
 
@@ -1446,5 +1818,65 @@ package fa_uvm_pkg;
         function new(string name, uvm_component parent);
             super.new(name, parent);
         endfunction
+    endclass
+
+    class fa_uvm_padding_mask_test extends fa_uvm_base_test;
+        `uvm_component_utils(fa_uvm_padding_mask_test)
+
+        function new(string name, uvm_component parent);
+            super.new(name, parent);
+        endfunction
+
+        task run_phase(uvm_phase phase);
+            fa_uvm_bonus_job_sequence seq;
+            phase.raise_objection(this);
+            seq = fa_uvm_bonus_job_sequence::type_id::create("seq");
+            seq.env = env;
+            seq.job.valid_len = 32'd130;
+            seq.job.job_id = 0;
+            seq.start(env.axil_agent.sequencer);
+            `uvm_info("FA_UVM_PASS", ">>> UVM PADDING MASK TESTS PASSED <<<", UVM_NONE)
+            phase.drop_objection(this);
+        endtask
+    endclass
+
+    class fa_uvm_multi_head_test extends fa_uvm_base_test;
+        `uvm_component_utils(fa_uvm_multi_head_test)
+
+        function new(string name, uvm_component parent);
+            super.new(name, parent);
+        endfunction
+
+        task run_phase(uvm_phase phase);
+            fa_uvm_bonus_job_sequence seq;
+            phase.raise_objection(this);
+            seq = fa_uvm_bonus_job_sequence::type_id::create("seq");
+            seq.env = env;
+            seq.job.head_count = 32'd2;
+            seq.job.head_stride_bytes = 32'(FA_TENSOR_BYTES);
+            seq.job.valid_len = FA_SEQ_LEN;
+            seq.job.job_id = 0;
+            seq.start(env.axil_agent.sequencer);
+            `uvm_info("FA_UVM_PASS", ">>> UVM MULTI-HEAD TESTS PASSED <<<", UVM_NONE)
+            phase.drop_objection(this);
+        endtask
+    endclass
+
+    class fa_uvm_task_queue_test extends fa_uvm_base_test;
+        `uvm_component_utils(fa_uvm_task_queue_test)
+
+        function new(string name, uvm_component parent);
+            super.new(name, parent);
+        endfunction
+
+        task run_phase(uvm_phase phase);
+            fa_uvm_task_queue_sequence seq;
+            phase.raise_objection(this);
+            seq = fa_uvm_task_queue_sequence::type_id::create("seq");
+            seq.env = env;
+            seq.start(env.axil_agent.sequencer);
+            `uvm_info("FA_UVM_PASS", ">>> UVM TASK QUEUE TESTS PASSED <<<", UVM_NONE)
+            phase.drop_objection(this);
+        endtask
     endclass
 endpackage

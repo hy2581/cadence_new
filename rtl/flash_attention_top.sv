@@ -68,14 +68,23 @@ module flash_attention_top (
     logic [63:0] reg_q_base, reg_k_base, reg_v_base, reg_o_base;
     logic [31:0] reg_stride_bytes;
     logic signed [15:0] reg_neg_large, reg_scale;
-    logic        status_busy, status_done;
+    logic [31:0] reg_valid_len, reg_head_count, reg_head_stride_bytes;
+    logic        status_busy, status_done, status_error;
     logic [31:0] cycle_count;
     logic [31:0] rd_bytes_count, wr_bytes_count;
     logic        datapath_rst_n;
+    logic [7:0]  queue_pending_count, queue_completed_count;
+    logic        queue_overflow;
 
     assign datapath_rst_n = rst_n & ~reg_soft_reset;
 
-    axi4_lite_slave #(.ADDR_WIDTH(AXIL_ADDR_WIDTH), .DATA_WIDTH(AXIL_DATA_WIDTH))
+    axi4_lite_slave #(
+        .ADDR_WIDTH(AXIL_ADDR_WIDTH),
+        .DATA_WIDTH(AXIL_DATA_WIDTH),
+        .DEFAULT_VALID_LEN(DEFAULT_VALID_LEN),
+        .DEFAULT_HEAD_COUNT(DEFAULT_HEAD_COUNT),
+        .DEFAULT_HEAD_STRIDE_BYTES(DEFAULT_HEAD_STRIDE_BYTES)
+    )
     u_axil (
         .clk(clk), .rst_n(rst_n),
         .s_axil_awaddr(s_axil_awaddr), .s_axil_awvalid(s_axil_awvalid), .s_axil_awready(s_axil_awready),
@@ -90,10 +99,16 @@ module flash_attention_top (
         .reg_q_base(reg_q_base), .reg_k_base(reg_k_base),
         .reg_v_base(reg_v_base), .reg_o_base(reg_o_base),
         .reg_stride_bytes(reg_stride_bytes),
+        .reg_valid_len(reg_valid_len),
+        .reg_head_count(reg_head_count),
+        .reg_head_stride_bytes(reg_head_stride_bytes),
         .reg_neg_large(reg_neg_large), .reg_scale(reg_scale),
-        .status_busy(status_busy), .status_done(status_done),
+        .status_busy(status_busy), .status_done(status_done), .status_error(status_error),
         .cycle_count(cycle_count),
         .rd_bytes(rd_bytes_count), .wr_bytes(wr_bytes_count),
+        .queue_pending_count(queue_pending_count),
+        .queue_completed_count(queue_completed_count),
+        .queue_overflow(queue_overflow),
         .irq(irq)
     );
 
@@ -112,16 +127,126 @@ module flash_attention_top (
     logic       tc_all_done, tc_busy;
     logic       tc_dma_rd_req_q, tc_dma_wr_req_q;
 
+    localparam JOB_QUEUE_DEPTH = 2;
+    localparam VALID_LEN_W = $clog2(SEQ_LEN) + 1;
+
+    typedef struct packed {
+        logic [63:0] q_base;
+        logic [63:0] k_base;
+        logic [63:0] v_base;
+        logic [63:0] o_base;
+        logic [31:0] stride_bytes;
+        logic [31:0] valid_len;
+        logic [7:0]  head_count;
+        logic [31:0] head_stride_bytes;
+        logic        causal_en;
+        logic signed [15:0] neg_large;
+        logic signed [15:0] scale;
+    } job_cfg_t;
+
+    job_cfg_t active_job;
+    job_cfg_t queued_jobs [JOB_QUEUE_DEPTH-1:0];
+    logic [1:0] queued_job_count;
+    logic       active_job_valid;
+    logic       launch_pending;
+    logic       dispatch_start;
+
+    function automatic job_cfg_t current_reg_job();
+        job_cfg_t job;
+        begin
+            job.q_base            = reg_q_base;
+            job.k_base            = reg_k_base;
+            job.v_base            = reg_v_base;
+            job.o_base            = reg_o_base;
+            job.stride_bytes      = reg_stride_bytes;
+            job.valid_len         = reg_valid_len;
+            job.head_count        = (reg_head_count[7:0] == 8'd0) ? 8'd1 : reg_head_count[7:0];
+            job.head_stride_bytes = (reg_head_stride_bytes == 32'd0) ?
+                                    32'(DEFAULT_HEAD_STRIDE_BYTES) : reg_head_stride_bytes;
+            job.causal_en         = reg_causal_en;
+            job.neg_large         = reg_neg_large;
+            job.scale             = reg_scale;
+            current_reg_job       = job;
+        end
+    endfunction
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            active_job_valid     <= 1'b0;
+            launch_pending       <= 1'b0;
+            dispatch_start       <= 1'b0;
+            queued_job_count     <= '0;
+            queue_pending_count  <= '0;
+            queue_completed_count <= '0;
+            queue_overflow       <= 1'b0;
+            active_job           <= '0;
+            for (int i = 0; i < JOB_QUEUE_DEPTH; i++)
+                queued_jobs[i] <= '0;
+        end else begin
+            dispatch_start <= 1'b0;
+
+            if (reg_soft_reset) begin
+                active_job_valid      <= 1'b0;
+                launch_pending        <= 1'b0;
+                queued_job_count      <= '0;
+                queue_pending_count   <= '0;
+                queue_completed_count <= '0;
+                queue_overflow        <= 1'b0;
+            end else begin
+                if (launch_pending) begin
+                    dispatch_start   <= 1'b1;
+                    launch_pending   <= 1'b0;
+                    active_job_valid <= 1'b1;
+                end
+
+                if (tc_all_done) begin
+                    active_job_valid <= 1'b0;
+                    if (queue_completed_count != 8'hFF)
+                        queue_completed_count <= queue_completed_count + 1'b1;
+
+                    if (queued_job_count != 0) begin
+                        active_job      <= queued_jobs[0];
+                        queued_jobs[0]  <= queued_jobs[1];
+                        queued_jobs[1]  <= '0;
+                        queued_job_count <= queued_job_count - 1'b1;
+                        launch_pending  <= 1'b1;
+                    end
+                end
+
+                if (reg_start) begin
+                    if (!active_job_valid && !launch_pending && !tc_busy) begin
+                        active_job     <= current_reg_job();
+                        launch_pending <= 1'b1;
+                    end else if (queued_job_count < 2'(JOB_QUEUE_DEPTH)) begin
+                        queued_jobs[queued_job_count] <= current_reg_job();
+                        queued_job_count <= queued_job_count + 1'b1;
+                    end else begin
+                        queue_overflow <= 1'b1;
+                    end
+                end
+
+                queue_pending_count <= {6'd0, queued_job_count};
+            end
+        end
+    end
+
+    logic [VALID_LEN_W-1:0] active_valid_len_cfg;
+    assign active_valid_len_cfg = (active_job.valid_len == 32'd0 || active_job.valid_len > 32'(SEQ_LEN)) ?
+                                  VALID_LEN_W'(SEQ_LEN) : active_job.valid_len[VALID_LEN_W-1:0];
+
     tile_controller #(
         .SEQ_LEN(SEQ_LEN), .HEAD_DIM(HEAD_DIM), .TILE_BR(TILE_BR), .TILE_BC(TILE_BC),
         .AXI_ADDR_WIDTH(AXI_ADDR_WIDTH), .DATA_WIDTH(DATA_WIDTH)
     ) u_tile_ctrl (
         .clk(clk), .rst_n(datapath_rst_n),
-        .start(reg_start), .all_done(tc_all_done), .busy(tc_busy),
-        .q_base_addr(reg_q_base), .k_base_addr(reg_k_base),
-        .v_base_addr(reg_v_base), .o_base_addr(reg_o_base),
-        .stride_bytes(reg_stride_bytes),
-        .causal_en(reg_causal_en),
+        .start(dispatch_start), .all_done(tc_all_done), .busy(tc_busy),
+        .q_base_addr(active_job.q_base), .k_base_addr(active_job.k_base),
+        .v_base_addr(active_job.v_base), .o_base_addr(active_job.o_base),
+        .stride_bytes(active_job.stride_bytes),
+        .valid_len(active_valid_len_cfg),
+        .head_count(active_job.head_count),
+        .head_stride_bytes(active_job.head_stride_bytes),
+        .causal_en(active_job.causal_en),
         .dma_rd_req(tc_dma_rd_req), .dma_rd_addr(tc_dma_rd_addr),
         .dma_rd_len_bytes(tc_dma_rd_len), .dma_rd_target(tc_dma_rd_target),
         .dma_rd_done(tc_dma_rd_done),
@@ -212,7 +337,8 @@ module flash_attention_top (
         .last_kv_tile(tc_compute_last_kv),
         .done(tc_compute_done), .busy(),
         .q_tile_idx(tc_q_tile_idx), .kv_tile_idx(tc_kv_tile_idx),
-        .causal_en(reg_causal_en), .scale(reg_scale), .neg_large(reg_neg_large),
+        .causal_en(active_job.causal_en), .valid_len(active_valid_len_cfg),
+        .scale(active_job.scale), .neg_large(active_job.neg_large),
         .q_rd_en(comp_q_rd_en), .q_rd_step(comp_q_step), .q_data(comp_q_data),
         .k_rd_en(comp_k_rd_en), .k_rd_step(comp_k_step), .k_data(comp_k_data),
         .v_rd_en(comp_v_rd_en), .v_rd_step(comp_v_step), .v_data(comp_v_data),
@@ -226,7 +352,7 @@ module flash_attention_top (
     always_ff @(posedge clk or negedge datapath_rst_n) begin
         if (!datapath_rst_n)
             cycle_cnt <= '0;
-        else if (reg_start)
+        else if (dispatch_start)
             cycle_cnt <= '0;
         else if (tc_busy)
             cycle_cnt <= cycle_cnt + 1;
@@ -241,7 +367,7 @@ module flash_attention_top (
         end else begin
             tc_dma_rd_req_q <= tc_dma_rd_req;
             tc_dma_wr_req_q <= tc_dma_wr_req;
-            if (reg_start) begin
+            if (dispatch_start) begin
                 rd_bytes_count <= '0;
                 wr_bytes_count <= '0;
             end else begin
@@ -254,6 +380,7 @@ module flash_attention_top (
     end
 
     // ========== Status ==========
-    assign status_busy  = tc_busy;
+    assign status_busy  = tc_busy | active_job_valid | launch_pending | (queued_job_count != 0);
     assign status_done  = tc_all_done;
+    assign status_error = queue_overflow;
 endmodule
