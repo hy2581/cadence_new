@@ -1,154 +1,332 @@
-# FlashAttention 硬件加速器 — 赛题需求验证报告
+# FlashAttention Contest-2 Verification Status
 
-## 验证环境
+This report tracks the RTL against the Contest-2 requirements for the
+`S=256, d=64, batch=1, head=1` FlashAttention accelerator.
 
-- **工具**: VCS X-2025.06 / Design Compiler X-2025.06-SP4
-- **环境**: native Synopsys 2025 server flow, no Docker container required
-- **服务器**: ubuntu@117.50.81.212 (16核, 62GB RAM)
-- **仿真时间**: 3.040秒 CPU时间
+Last updated: 2026-05-19 23:34 CST.
 
-## 端到端仿真结果
+## Tool Environment
 
-```
-============================================================
-  RESULTS
-  Cycles:         276100
-  mean_abs_error: 0.013350
-  max_abs_error:  0.238281
-============================================================
-  Cycles:  PASS (276100 < 300k)
-  Mean:    PASS (0.013350)
-  Max:     PASS (0.238281)
+- Simulator: Synopsys VCS X-2025.06
+- Synthesis: Synopsys Design Compiler X-2025.06-SP4
+- Target library: Sky130 HS `sky130_fd_sc_hs__tt_025C_1v80_noccsn.db`
+- Remote workspace: `/home/hy258/cadence_new`
+
+## Latest Completed VCS Result
+
+Latest clean run:
+`/home/hy258/cadence_new/build/vcs_verification_completion_system/sim.log`
+
+```text
+Cycles:         299745
+RD_BYTES:       2260992
+WR_BYTES:       32768
+mean_abs_error: 0.001955
+max_abs_error:  0.004405
+row0_causal:    0.003906
 >>> ALL TESTS PASSED <<<
 ```
 
-## 赛题需求逐项验证
+Strict testbench checks passed:
 
-### 2.1 基本功能要求（必选）
+- `cycles < 300000`
+- `mean_abs_error <= 0.03`
+- `max_abs_error <= 0.10`
+- row-0 causal mask corner check
+- `RD_BYTES == 2260992`
+- `WR_BYTES == 32768`
 
-| # | 需求 | 状态 | 验证依据 |
-|---|------|------|----------|
-| (1) | SDPA计算 (s=256, d=64) | ✅ PASS | system_tb端到端仿真通过，256×64的Q/K/V输入产生正确O输出 |
-| (2a) | 禁止显式存储注意力矩阵 | ✅ PASS | buffer_system.sv中只有tile级buffer (B_r×B_c=4×16)，无256×256矩阵 |
-| (2b) | 使用在线(online)softmax | ✅ PASS | online_softmax_unit.sv实现running max/sum，跨KV-tile迭代维护m_old/l_old |
-| (2c) | 分块(tiling)处理K/V | ✅ PASS | tile_controller.sv: B_r=4, B_c=16, 外循环64个Q-tiles，内循环16个KV-tiles |
-| (3) | 固定输入规模 s=256, d=64 | ✅ PASS | fa_params.svh: SEQ_LEN=256, HEAD_DIM=64 |
-| (4a) | 输入Q8.8 (16-bit有符号定点) | ✅ PASS | DATA_WIDTH=16, FRAC_BITS=8 |
-| (4b) | 累加≥32-bit | ✅ PASS | ACC_WIDTH=40 |
-| (4c) | 输出Q8.8 | ✅ PASS | output_accumulator.sv最终截断为DATA_WIDTH(16-bit) |
-| (5a) | AXI4-Lite控制接口 | ✅ PASS | axi4_lite_slave.sv实现完整的寄存器读写 |
-| (5b) | AXI4 Master DMA数据接口 | ✅ PASS | dma_engine.sv + axi4_master_if.sv实现突发读写 |
-| (6) | 寄存器映射(TABLE 2) | ✅ PASS | 见下方详细对照 |
-| (7) | 存储约束：禁存score/p全矩阵 | ✅ PASS | 只有B_r×B_c=4×16的tile级p_matrix |
-| (8) | 精度：mean_abs_error | ✅ PASS | 0.013350 (远小于0.5门限) |
-| (8) | 精度：max_abs_error | ✅ PASS | 0.238281 (远小于2.0门限) |
-| (9) | 测试验证：SV+UVM或Python+cocotb | ✅ PASS | SystemVerilog testbench (system_tb.sv) |
+## Verification Completion Suite
 
-### 寄存器映射验证 (TABLE 2)
+Enhanced verification run:
+`/home/hy258/cadence_new/build/vcs_verification_completion/sim.log`
 
-| Offset | 名称 | 赛题要求 | 实现状态 |
-|--------|------|----------|----------|
-| 0x00 | CTRL | START/SOFT_RESET/IRQ_EN | ✅ axi4_lite_slave.sv |
-| 0x04 | STATUS | BUSY/DONE/ERROR | ✅ axi4_lite_slave.sv |
-| 0x08 | CFG | CAUSAL_EN | ✅ axi4_lite_slave.sv |
-| 0x14-0x18 | Q_BASE | 64-bit Q基地址 | ✅ |
-| 0x1C-0x20 | K_BASE | 64-bit K基地址 | ✅ |
-| 0x24-0x28 | V_BASE | 64-bit V基地址 | ✅ |
-| 0x2C-0x30 | O_BASE | 64-bit O基地址 | ✅ |
-| 0x34 | STRIDE_BYTES | 行stride | ✅ 默认d*2=128 |
-| 0x38 | NEG_LARGE | -inf近似值 | ✅ 默认0x8000 |
-| 0x3C | SCALE | 缩放常数 | ✅ 默认0x0020 (1/√64) |
-| 0x40 | CYCLES | 执行周期数 | ✅ 只读 |
+Coverage report:
+`/home/hy258/cadence_new/build/vcs_verification_completion/coverage_report`
 
-### 2.2 性能要求（必选 Baseline）
+Coverage dashboard summary:
 
-| # | 需求 | 状态 | 结果 |
-|---|------|------|------|
-| (1) | 主频目标 | ⚠️ 待DC综合 | 需要Genus/DC综合报告 |
-| (2) | 面积≤200万门 | ⚠️ 待DC综合 | 需要Genus/DC综合报告 |
-| (3) | 单次attention < 300k cycles | ✅ PASS | **276,100 cycles** |
-| (4) | 带宽统计 | ✅ 见分析 | 见下方带宽分析 |
-
-### 带宽分析
-
-| 操作 | 数据量 | 说明 |
-|------|--------|------|
-| 读Q | 32 KB | 64 Q-tiles × 4行 × 64列 × 2B |
-| 读K | 512 KB | 64 Q-tiles × 16 KV-tiles × 16行 × 64列 × 2B |
-| 读V | 512 KB | 同K |
-| 写O | 32 KB | 64 Q-tiles × 4行 × 64列 × 2B |
-| **总计** | **1,088 KB** | 约1MB |
-
-K/V每个Q-tile都要重新读取（无片上全量缓存），总读取量 = Q(32KB) + K(512KB) + V(512KB) = 1,056KB。
-
-### Testbench验证覆盖
-
-| 测试项 | 状态 | 说明 |
-|--------|------|------|
-| AXI4-Lite寄存器读写 | ✅ | system_tb中axil_write/axil_read配置全部寄存器 |
-| 随机Q/K/V端到端验证 | ✅ | 256×64随机数据，与FP32 golden对比 |
-| Causal mask验证 | ✅ | CFG.CAUSAL_EN=1，golden计算中j>i时mask |
-| DMA读写完整流程 | ✅ | Q/K/V从外存DMA加载，O通过DMA写回 |
-| 启动/完成流程 | ✅ | CTRL.START→BUSY→DONE polling |
-
-## 模块结构
-
-```
-flash_attention_top
-├── axi4_lite_slave        (控制接口 + 寄存器文件)
-├── tile_controller        (Tiling循环控制 + 地址生成)
-├── dma_engine             (DMA读写引擎)
-│   └── axi4_master_if     (AXI4 Master接口)
-├── buffer_system          (Q/K/V/O片上缓存, K/V双缓冲)
-└── compute_core           (计算核心)
-    ├── dot_product_array   (点积阵列, 8 MACs并行)
-    ├── online_softmax_unit (在线softmax)
-    │   └── exp_approx_unit (定点exp近似, 1024-entry LUT)
-    ├── output_accumulator  (输出累加器)
-    └── causal_mask_unit    (Causal mask生成)
+```text
+SCORE  LINE   COND   TOGGLE FSM    BRANCH GROUP
+ 62.36  53.31  73.35  54.90  62.50  30.12 100.00
 ```
 
-## 已知问题
+Additional verification added for the contest completion task:
 
-### 1. Online Softmax Rescale 数学简化 (⚠️)
+- Verification plan / compliance matrix: `tb/verification/verification_plan.md`
+- AXI VIP-lite protocol monitors: `tb/verification/fa_axi_vip_lite.sv`
+- RAL-like register model and enhanced system TB: `tb/verification/fa_verification_tb.sv`
+- VCS coverage script: `scripts/run_verification_suite.sh`
 
-**问题描述**: `online_softmax_unit.sv` 中的rescale计算使用了简化近似：
+Enhanced suite result:
 
+```text
+Cycles:             299745
+RD_BYTES:           2260992
+WR_BYTES:           32768
+DMA Q/K/V read:     32768 / 1114112 / 1114112
+DMA O write:        32768
+AXI AR/AW bursts:   1152 / 64
+AXI R/W beats:      141312 / 2048
+AXIL R/W accesses:  2957 / 25
+mean_abs_error:     0.001955
+max_abs_error:      0.004405
+row0_causal:        0.003906
+Functional coverage reg/flow/dma/axi/perf: 100.00 100.00 100.00 100.00 100.00
+>>> VERIFICATION COMPLETION TESTS PASSED <<<
 ```
-// 正确实现应为:
-// l_new = exp(m_old - m_new) * l_old + sum(exp(s - m_new))
-// rescale = exp(m_old - m_new)
 
-// 当前简化实现:
-l_new <= l_old + rsum;         // 缺少 exp(m_old-m_new) 缩放
-rescale <= l_old;              // 应为 exp(m_old-m_new)
+The lightweight VIP-lite monitors check valid-ready payload stability, legal
+AXI4 burst shape, WLAST/RLAST alignment, OKAY responses, WSTRB legality, and
+X/Z-free valid payloads. Commercial AXI VIP was not found in the available
+`/eda` Cadence/Synopsys install paths, so this focused checker is documented as
+the local AXI VIP substitute.
+
+## UVM Verification Environment
+
+Full UVM run:
+`/home/hy258/cadence_new/build/vcs_uvm_verification/sim.log`
+
+Coverage report:
+`/home/hy258/cadence_new/build/vcs_uvm_verification/coverage_report`
+
+UVM source and runner:
+
+- `tb/uvm/fa_uvm_if.sv`
+- `tb/uvm/fa_uvm_pkg.sv`
+- `tb/uvm/fa_uvm_tb.sv`
+- `scripts/run_uvm_verification.sh`
+
+The UVM environment uses local UVM VIP-lite protocol checking, not commercial
+AXI VIP. It contains AXI4-Lite and AXI4 master interfaces, an active AXI4-Lite
+agent, a passive AXI DMA monitor/agent, register and attention-job sequence
+items, reset/register/job sequences, scoreboard, functional coverage, env,
+base test, `fa_uvm_causal_e2e_test`, and `fa_uvm_smoke_test`.
+
+UVM result:
+
+```text
+UVM test:           fa_uvm_causal_e2e_test
+Cycles:            299745
+RD_BYTES:          2260992
+WR_BYTES:          32768
+DMA Q/K/V read:    32768 / 1114112 / 1114112
+DMA O write:       32768
+AXI AR/AW bursts:  1152 / 64
+mean_abs_error:    0.002143
+max_abs_error:     0.005659
+row0_causal:       0.003906
+UVM warnings/errors/fatals: 0 / 0 / 0
+Functional coverage reg/flow/dma/axi/perf: 100.00 100.00 100.00 100.00 100.00
+>>> UVM VERIFICATION TESTS PASSED <<<
 ```
 
-**影响**: 当m值在不同KV-tile间变化时,会引入额外误差。但由于:
-1. 测试数据范围较小(Q8.8格式,$random % 64)
-2. 最终有除以l_new的归一化步骤
-3. exp_approx_unit的LUT精度本身就是近似的
+UVM coverage dashboard summary:
 
-实际仿真误差仍在可接受范围内(mean=0.013, max=0.238)。
+```text
+SCORE  LINE   COND   TOGGLE FSM    BRANCH GROUP
+ 58.90  44.52  87.88  33.12  62.50  25.37 100.00
+```
 
-**修复建议**: 如果精度要求更严格,需要在softmax单元中增加一个exp(m_old-m_new)的计算步骤,复用现有的exp_approx_unit。
+Existing enhanced non-UVM preservation run after adding the UVM environment:
+`/home/hy258/cadence_new/build/vcs_uvm_preserve_verification_suite/sim.log`
 
-### 2. compute_core FRAC_BITS 参数不一致
+```text
+Cycles:             299745
+RD_BYTES:           2260992
+WR_BYTES:           32768
+mean_abs_error:     0.001955
+max_abs_error:      0.004405
+row0_causal:        0.003906
+>>> VERIFICATION COMPLETION TESTS PASSED <<<
+```
 
-`fa_params.svh` 定义 `FRAC_BITS=8`(Q8.8),但 `compute_core.sv` 将 `FRAC_BITS=16` 传给 softmax 和 accumulator。这是有意为之——内部计算使用更高精度(Q24.16),最终输出时截断回Q8.8。
+## Latest Completed DC Result
 
-### 3. 面积和时序未验证
+Latest clean run:
+`/home/hy258/cadence_new/build/dc_quality_lint_timing_20260518_1523`
 
-需要DC/Genus综合才能确认面积≤200万门和最高工作频率。当前验证仅覆盖功能和性能(cycle数)。
+Key reports:
 
-## 结论
+- QoR: `reports/dc_qor.rpt`
+- Max timing: `reports/dc_timing_max.rpt`
+- Min timing: `reports/dc_timing_min.rpt`
+- Lint/design check: `reports/dc_check_design.rpt`
+- Area: `reports/dc_area.rpt`
 
-**FlashAttention硬件加速器IP通过了赛题二全部基本功能和性能要求的验证。**
+Summary from `dc_qor.rpt`:
 
-- ✅ 所有必选功能要求均已实现并通过验证
-- ✅ 性能指标 276,100 cycles 优于 300,000 cycles 要求
-- ✅ 精度满足定点近似误差门限
-- ✅ FlashAttention核心约束(禁存注意力矩阵、在线softmax、分块tiling)均已满足
-- ✅ AXI4-Lite/AXI4接口和寄存器映射完全符合赛题TABLE 2规范
-- ⚠️ Online softmax的rescale使用了近似实现,但仿真结果仍满足精度要求
-- ⚠️ 面积和主频需要进一步DC/Genus综合确认
+```text
+Critical Path Length:          9.76
+Critical Path Slack:           0.00
+Critical Path Clk Period:     10.00
+Total Negative Slack:          0.00
+No. of Violating Paths:        0.00
+Worst Hold Violation:          0.00
+Total Hold Violation:          0.00
+No. of Hold Violations:        0.00
+Max Trans Violations:             0
+Max Cap Violations:               0
+Cell Area:           7311294.140080
+```
+
+Worst max path:
+`u_compute/u_oa/col_base_reg[3] -> u_compute/u_oa/o_acc_reg[1][58][37]`,
+reported as `slack (MET) 0.00`.
+
+The current DC result is setup/hold/transition/capacitance clean at 10ns, but
+the setup margin is still exactly 0.00ns. The previous worst
+`kv_buf_sel -> dot_product acc` path has been cut by registering dot-product
+inputs, at the cost of 544 additional cycles. Further timing work should focus
+on real RTL or microarchitectural margin, not on weakening constraints.
+
+## SDF And Activity Power Closure Attempts
+
+SDF export from the latest clean DC netlist/SDC succeeded on 2026-05-19:
+
+- Command: `SDF_EXPORT_TAG=20260519_1647 bash scripts/run_sdf_export.sh`
+- Log: `build/dc_sdf_export_20260519_1647/dc_sdf_export.log`
+- DDC: `build/dc_sdf_export_20260519_1647/netlist/fa_top.ddc`
+- SDF: `build/dc_sdf_export_20260519_1647/netlist/fa_top.sdf`
+- SPEF/parasitics: `build/dc_sdf_export_20260519_1647/netlist/fa_top.spef`
+- Export QoR: `build/dc_sdf_export_20260519_1647/reports/dc_sdf_export_qor.rpt`
+
+SDF-annotated VCS GLS now completes with the opt-in Sky130 SDF condition-token
+and async `RECREM` normalization:
+
+- Command: `POST_SYNTH_BUILD_DIR=/home/hy258/cadence_new/build/vcs_sdf_async_warning_cleanup_gls POST_SYNTH_SDF=1 SDF_FILE=/home/hy258/cadence_new/build/dc_sdf_export_20260519_1647/netlist/fa_top.sdf POST_SYNTH_USE_SPECIFY=1 POST_SYNTH_NORMALIZE_SKY130_SDF=1 POST_SYNTH_NORMALIZE_SKY130_SDF_ASYNC=1 bash scripts/run_post_synth_sim.sh`
+- Normalized SDF: `build/vcs_sdf_async_warning_cleanup_gls/fa_top.sky130_pathnames_async.sdf`
+- Normalization report: `build/vcs_sdf_async_warning_cleanup_gls/sky130_sdf_normalization_report.txt`
+- Compile log: `build/vcs_sdf_async_warning_cleanup_gls/compile.log`
+- Simulation log: `build/vcs_sdf_async_warning_cleanup_gls/sim.log`
+- Run summary: `remote_codex_jobs/sdf_async_warning_cleanup_20260519_210546/final.md`
+
+The normalizer keeps the original exported SDF intact and rewrites only
+standalone `A1N/A2N` tokens to `A1_N/A2_N` in `COND` lines inside affected
+`o2bb2ai/a2bb2oi/o2bb2a` Sky130 HS `CELLTYPE` blocks. With the async opt-in, it
+also merges adjacent `dfrtp/dfstp` async `RECOVERY`/`HOLD` records into the
+single `RECREM` form present in the PDK specify blocks. It does not change
+delay numbers, instances, hierarchy, or celltype names. The final report shows
+`changed_cells=4020`, `changed_lines=48240`, `A1N_to_A1_N=36180`,
+`A2N_to_A2_N=36180`, and `async_recrem_pairs=14708`.
+
+SDF GLS system result:
+
+```text
+Cycles:         299745
+RD_BYTES:       2260992
+WR_BYTES:       32768
+mean_abs_error: 0.001955
+max_abs_error:  0.004405
+row0_causal:    0.003906
+>>> ALL TESTS PASSED <<<
+```
+
+The previous pathname and async timing-check blockers are closed in this run:
+`SDFCOM_IANE=0`, `SDFCOM_TANE=0`, `SDFCOM_INF=0`, `SDFCOM_CFTC=0`,
+`SDFCOM_NL=0`, and `WSUM=0`. Remaining annotation warnings are not clean timing
+signoff: `SDFCOM_SWC=148`, `SDFCOM_IWSBA=55`, `SDFCOM_NDI=116`, `MDOTDS=5`,
+`TFIPC=184`, `IPDW=3`, and `IDTS=2`; total compile `Warning-=513`,
+`Error-=0`, `Fatal=0`. Simulation logs contain no
+setup/hold/recovery/removal timing violation messages.
+
+Activity-based DC power from RTL VCD/SAIF succeeded:
+
+- Command: `POWER_ACTIVITY_TAG=20260519_1654 bash scripts/run_power_activity.sh`
+- RTL simulation log: `build/vcs_power_activity_20260519_1654/sim.log`
+- VCD: `build/vcs_power_activity_20260519_1654/fa_system_tb.vcd`
+- SAIF: `build/dc_power_activity_20260519_1654/activity/fa_system_tb_dut.saif`
+- VCD-to-SAIF log: `build/dc_power_activity_20260519_1654/vcd2saif.log`
+- DC log: `build/dc_power_activity_20260519_1654/dc_power_activity.log`
+- Power report: `build/dc_power_activity_20260519_1654/reports/dc_power_activity.rpt`
+- Hierarchical report: `build/dc_power_activity_20260519_1654/reports/dc_power_activity_hier.rpt`
+
+Activity power numbers:
+
+```text
+Cell Internal Power  =   2.2902  W
+Net Switching Power  =  19.4931 mW
+Total Dynamic Power  =   2.3097  W
+Cell Leakage Power   =  78.6975 uW
+Total table row      =   2.3107e+03 mW
+```
+
+DC accepted the SAIF, but the report contains annotation caveats:
+3 switching-activity conflicts, ignored constant-net annotations, a clock
+toggle conflict where DC used the annotated value, and unannotated sequential
+cell outputs.
+
+## Requirement Checklist
+
+| Requirement | Status | Evidence |
+|---|---:|---|
+| Fixed problem size `S=256, d=64` | PASS | `rtl/include/fa_params.svh` |
+| Q/K/V input signed Q8.8 16-bit | PASS | `DATA_WIDTH=16`, testbench fixed-point load |
+| O output signed Q8.8 16-bit | PASS | `output_accumulator.sv` final Q16.16 to Q8.8 conversion with saturation |
+| Dot-product accumulator at least 32-bit | PASS | `ACC_WIDTH=40` |
+| No full `S x S` attention matrix storage | PASS | tile-local score/probability buffering only |
+| Online softmax | PASS | running `m_old/l_old`, `exp(m_old-m_new)` rescale |
+| K/V tiling | PASS | `TILE_BR=4`, `TILE_BC=16`; causal mode prunes unused future K/V tiles |
+| Causal mask | PASS | row-0 causal corner passes in system TB |
+| AXI4-Lite control/status registers | PASS | CTRL/STATUS/CFG/base/stride/NEG_LARGE/SCALE/CYCLES/RD_BYTES/WR_BYTES |
+| AXI VIP / protocol checks | PASS | `tb/verification/fa_axi_vip_lite.sv`, enhanced suite PASS |
+| Full UVM verification environment | PASS | `tb/uvm/`, `scripts/run_uvm_verification.sh`, `build/vcs_uvm_verification/sim.log` |
+| Register model validation | PASS | RAL-like mirror in `tb/verification/fa_verification_tb.sv` covers defaults, RW/RO/W1C, byte strobe, soft_reset/start/done |
+| AXI4 master DMA | PASS | DMA read/write through `dma_engine.sv` and `axi4_master_if.sv`; enhanced suite checks Q/K/V/O ranges and byte counts |
+| Random Q/K/V end-to-end test | PASS | `tb/unit_tb/system_tb.sv` |
+| Start/done flow | PASS | AXI4-Lite START plus DONE polling |
+| Bandwidth statistics | PASS | `REG_RD_BYTES` and `REG_WR_BYTES` checked by system TB |
+| Coverage | PASS | `build/vcs_verification_completion/coverage_report`; code metrics enabled and group coverage is 100% |
+| Causal runtime below 300k cycles | PASS | latest VCS: 299,745 cycles |
+| 10ns Sky130 HS DC setup/hold/DRC | PASS | `build/dc_quality_lint_timing_20260518_1523/reports/dc_qor.rpt` |
+| Area evidence | RECORDED | Sky130 HS raw cell area `7311294.140080`; NAND2-equivalent normalization not reported by this DC run |
+| SDF export | PASS | `build/dc_sdf_export_20260519_1647/netlist/fa_top.sdf`, plus DDC/SPEF in the same directory |
+| SDF timing GLS | PASS with residual annotation warnings | `build/vcs_sdf_async_warning_cleanup_gls/sim.log`; normalized SDF removes pathname and async reset/set blockers (`IANE/TANE/INF/CFTC/NL/WSUM=0`), with residual `SWC/IWSBA/NDI` and non-SDF warning classes |
+| Activity-based DC power | PASS | `build/dc_power_activity_20260519_1654/reports/dc_power_activity.rpt` |
+
+## Known Follow-Up Items
+
+- `dc_check_design.rpt` still contains LINT warnings, but the obvious RTL
+  source issues were reduced. Remaining warnings are mainly buffer read-enable
+  inputs, AXI response/id inputs that are intentionally ignored, constant AXI
+  outputs, and synthesis optimization residue.
+- Worst setup slack is exactly 0.00ns. Timing should be improved only through
+  functionally justified RTL or microarchitectural changes.
+- No-SDF gate-level/post-synthesis simulation passes with the generated Sky130
+  functional wrapper overlay. The opt-in timing overlay plus normalized SDF
+  now completes SDF GLS with matching functional metrics and no
+  `IANE/TANE/INF/CFTC/NL/WSUM` warnings. This is still not a clean timing
+  signoff because residual annotation warnings remain: `SDFCOM_SWC=148`,
+  `SDFCOM_IWSBA=55`, and `SDFCOM_NDI=116`.
+- Activity-based power is recorded from RTL VCD/SAIF and DC `read_saif`, with
+  annotation caveats listed above. A gate-level SAIF with full post-synthesis
+  name matching would be stronger evidence.
+
+## Bandwidth Accounting
+
+With causal K/V tile pruning:
+
+- Q reads: `64 q_tiles * 512 B = 32768 B`
+- K/V reads: `544 kv_tile_visits * 4096 B = 2228224 B`
+- Total reads: `2260992 B`
+- O writes: `64 q_tiles * 512 B = 32768 B`
+
+The testbench reads `REG_RD_BYTES=0x44` and `REG_WR_BYTES=0x48` and fails if
+these values differ from the expected causal-pruned transfer counts.
+
+## Reproduction Commands
+
+```bash
+cd /home/hy258/cadence_new
+
+VCS_BUILD_DIR=/home/hy258/cadence_new/build/vcs_quality_<tag> \
+  bash scripts/run_system_tb.sh
+
+VCS_BUILD_DIR=/home/hy258/cadence_new/build/vcs_verification_completion \
+VCS_ENABLE_COVERAGE=1 \
+  bash scripts/run_verification_suite.sh
+
+DC_MAX_CORES=4 \
+DC_OUT_DIR=/home/hy258/cadence_new/build/dc_quality_<tag> \
+  bash scripts/run_dc.sh
+```

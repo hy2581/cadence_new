@@ -15,7 +15,6 @@ module exp_approx_unit #(
     input  logic                        rst_n,
     input  logic                        valid_in,
     input  logic signed [IN_WIDTH-1:0]  x_in,
-    input  logic signed [15:0]          neg_large,
     output logic                        valid_out,
     output logic [OUT_WIDTH-1:0]        exp_out
 );
@@ -30,13 +29,19 @@ module exp_approx_unit #(
     logic [9:0] idx_p1;
     logic clamp_low_p1, clamp_high_p1;
 
-    // Combinational index computation (verified in debug)
+    // Combinational index computation:
+    // idx ~= (x + 16) * 1024 / 20, with x represented in Q*.FRAC_IN.
+    // 13107 / 2^8 is a close fixed-point approximation to 1024 / 20.
+    localparam int INDEX_MUL = 13107;
+    localparam int INDEX_SHIFT = FRAC_IN + 8;
     reg signed [IN_WIDTH-1:0] x_plus_16_c;
     reg signed [IN_WIDTH-1:0] idx_calc_c;
+    reg signed [IN_WIDTH+14:0] idx_num_c;
 
     always @(*) begin
         x_plus_16_c = x_in + (16 * (1 << FRAC_IN));
-        idx_calc_c  = x_plus_16_c / 5;
+        idx_num_c   = x_plus_16_c * INDEX_MUL;
+        idx_calc_c  = idx_num_c >>> INDEX_SHIFT;
     end
 
     always_ff @(posedge clk or negedge rst_n) begin

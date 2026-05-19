@@ -47,6 +47,7 @@ VCS_ARGS=(
     -sverilog
     "+incdir+${PROJECT_ROOT}/rtl/include"
     +define+SIMULATION
+    +define+SYNTHESIS
     -timescale=1ns/1ps
 )
 
@@ -59,6 +60,14 @@ fi
 
 if [ -n "${VCS_LDFLAGS:-}" ]; then
     VCS_ARGS+=(-LDFLAGS "${VCS_LDFLAGS}")
+fi
+
+SIM_ARGS=()
+if [ -n "${VCS_SIM_ARGS:-}" ]; then
+    # Intentionally split user-supplied runtime plusargs/options.
+    # shellcheck disable=SC2206
+    EXTRA_SIM_ARGS=(${VCS_SIM_ARGS})
+    SIM_ARGS+=("${EXTRA_SIM_ARGS[@]}")
 fi
 
 echo "================================================"
@@ -82,7 +91,7 @@ fi
 
 echo ""
 echo "[2/2] Running simulation..."
-./simv_system -l sim.log 2>&1 | tee sim.stdout
+./simv_system "${SIM_ARGS[@]}" -l sim.log 2>&1 | tee sim.stdout
 
 echo ""
 echo "================================================"

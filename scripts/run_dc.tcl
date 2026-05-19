@@ -6,10 +6,12 @@
 # Important environment variables:
 #   PROJECT_ROOT   Repository root. Defaults to the current directory.
 #   DC_OUT_DIR     Output directory. Defaults to $PROJECT_ROOT/build/dc.
-#   DC_TARGET_LIB  Real target .db library. Defaults to the TSMC12 slow corner
-#                  configured by scripts/tsmc12_env.sh when available.
+#   DC_TARGET_LIB  Real target .db library. Defaults to the Sky130 library
+#                  configured by scripts/sky130_env.sh when available.
 #   DC_DW_LIB      Optional DesignWare .sldb override.
 #   DC_COMPILE_CMD Optional compile command. Defaults to compile_ultra.
+#   DC_ENABLE_TSMC12_FALLBACK
+#                  Optional legacy fallback. Keep unset/0 for final Sky130 runs.
 
 proc env_or_default {name default_value} {
     if {[info exists ::env($name)] && $::env($name) ne ""} {
@@ -68,22 +70,45 @@ if {$snps_install_root ne ""} {
 }
 
 set target_from_env [env_or_default DC_TARGET_LIB ""]
-set tsmc_home [env_or_default TSMCHOME ""]
-set tsmc12_lib_name [env_or_default TSMC12_LIB_NAME "tcbn12ffcllbwp6t16p96cpd"]
-set tsmc12_lib_rev [env_or_default TSMC12_LIB_REV "120a"]
-set tsmc12_corner [env_or_default TSMC12_CORNER "ssgnp0p72v125c"]
-set tsmc12_lib_dir [env_or_default TSMC12_LIB_DIR ""]
-if {$tsmc12_lib_dir eq "" && $tsmc_home ne ""} {
-    set tsmc12_lib_dir [file join $tsmc_home digital Front_End timing_power_noise NLDM "${tsmc12_lib_name}_${tsmc12_lib_rev}"]
+set sky130_home [env_or_default SKY130_HOME ""]
+set sky130_target_from_env [env_or_default SKY130_TARGET_LIB ""]
+set user_home [env_or_default HOME ""]
+set sky130_hs_default_target ""
+set sky130_hd_default_target ""
+if {$sky130_home ne ""} {
+    set sky130_hd_default_target [file join $sky130_home sky130_hd_v3.db]
 }
-set tsmc12_target_from_env [env_or_default TSMC12_TARGET_LIB ""]
+if {$user_home ne ""} {
+    set sky130_hs_default_target [file join $user_home cadence_codex_run_20260430_2114 pdk sky130_fd_sc_hs db sky130_fd_sc_hs__tt_025C_1v80_noccsn.db]
+}
+set allow_tsmc12_fallback [env_or_default DC_ENABLE_TSMC12_FALLBACK "0"]
+set tsmc_home ""
+set tsmc12_lib_name ""
+set tsmc12_lib_rev ""
+set tsmc12_corner ""
+set tsmc12_lib_dir ""
+set tsmc12_target_from_env ""
 set tsmc12_default_target ""
-if {$tsmc12_lib_dir ne ""} {
-    set tsmc12_default_target [file join $tsmc12_lib_dir "${tsmc12_lib_name}${tsmc12_corner}.db"]
+if {$allow_tsmc12_fallback eq "1"} {
+    set tsmc_home [env_or_default TSMCHOME ""]
+    set tsmc12_lib_name [env_or_default TSMC12_LIB_NAME "tcbn12ffcllbwp6t16p96cpd"]
+    set tsmc12_lib_rev [env_or_default TSMC12_LIB_REV "120a"]
+    set tsmc12_corner [env_or_default TSMC12_CORNER "ssgnp0p72v125c"]
+    set tsmc12_lib_dir [env_or_default TSMC12_LIB_DIR ""]
+    if {$tsmc12_lib_dir eq "" && $tsmc_home ne ""} {
+        set tsmc12_lib_dir [file join $tsmc_home digital Front_End timing_power_noise NLDM "${tsmc12_lib_name}_${tsmc12_lib_rev}"]
+    }
+    set tsmc12_target_from_env [env_or_default TSMC12_TARGET_LIB ""]
+    if {$tsmc12_lib_dir ne ""} {
+        set tsmc12_default_target [file join $tsmc12_lib_dir "${tsmc12_lib_name}${tsmc12_corner}.db"]
+    }
 }
 
 set PDK_LIB [first_existing_file [list \
     $target_from_env \
+    $sky130_target_from_env \
+    $sky130_hs_default_target \
+    $sky130_hd_default_target \
     $tsmc12_target_from_env \
     $tsmc12_default_target \
     [file join $WS lib NangateOpenCellLibrary.db] \
@@ -97,11 +122,13 @@ if {$PDK_LIB eq ""} {
     exit 2
 }
 
+set using_sky130_default [expr {$PDK_LIB ne "" && (($sky130_hs_default_target ne "" && [file normalize $PDK_LIB] eq [file normalize $sky130_hs_default_target]) || ($sky130_hd_default_target ne "" && [file normalize $PDK_LIB] eq [file normalize $sky130_hd_default_target]))}]
+set using_sky130_env [expr {$PDK_LIB ne "" && $sky130_target_from_env ne "" && [file normalize $PDK_LIB] eq [file normalize $sky130_target_from_env]}]
 set using_tsmc12_default [expr {$PDK_LIB ne "" && $tsmc12_default_target ne "" && [file normalize $PDK_LIB] eq [file normalize $tsmc12_default_target]}]
-if {!$using_tsmc12_default && $target_from_env eq "" && ![file exists [file join $WS lib NangateOpenCellLibrary.db]]} {
-    puts "WARNING: no TSMC12 target library was found from TSMCHOME/TSMC12_* variables."
-    puts "WARNING: using sample target library: $PDK_LIB"
-    puts "WARNING: reports from sample libraries are for flow validation only, not final QoR."
+if {!$using_sky130_default && !$using_sky130_env && !$using_tsmc12_default && $target_from_env eq "" && ![file exists [file join $WS lib NangateOpenCellLibrary.db]]} {
+    puts "WARNING: no Sky130 target library was found from environment variables."
+    puts "WARNING: using fallback target library: $PDK_LIB"
+    puts "WARNING: reports from fallback libraries are for flow validation only, not final QoR."
 }
 
 set DW_LIB [env_or_default DC_DW_LIB [first_existing_file [list \
@@ -115,8 +142,9 @@ puts "=============================================="
 puts "Project root  : $WS"
 puts "Output dir    : $OUT_DIR"
 puts "Target library: $PDK_LIB"
-puts "TSMCHOME      : $tsmc_home"
-puts "TSMC12 corner : $tsmc12_corner"
+puts "SKY130_HOME   : $sky130_home"
+puts "Sky130 target : $sky130_target_from_env"
+puts "TSMC12 fallback: $allow_tsmc12_fallback"
 puts "DW library    : $DW_LIB"
 puts "Syn lib dir   : $syn_lib_dir"
 puts "=============================================="

@@ -8,8 +8,37 @@
 module system_tb;
 
     logic clk, rst_n;
-    initial begin clk = 0; forever #1 clk = ~clk; end
-    initial begin rst_n = 0; repeat(20) @(posedge clk); rst_n = 1; end
+    real clk_half_ns;
+    initial begin
+        clk_half_ns = 1.0;
+        void'($value$plusargs("FA_CLK_HALF_NS=%f", clk_half_ns));
+        clk = 0;
+        forever #(clk_half_ns) clk = ~clk;
+    end
+    initial begin
+        rst_n = 0;
+        repeat(20) @(posedge clk);
+        @(negedge clk);
+        rst_n = 1;
+    end
+
+    string fa_dump_vcd_path;
+    integer fa_dump_vcd_depth;
+    initial begin
+        fa_dump_vcd_depth = 0;
+        if ($value$plusargs("FA_DUMP_VCD=%s", fa_dump_vcd_path)) begin
+            void'($value$plusargs("FA_DUMP_VCD_DEPTH=%d", fa_dump_vcd_depth));
+            $display("FA_DUMP_VCD: dumping system_tb.dut depth %0d to %s",
+                fa_dump_vcd_depth, fa_dump_vcd_path);
+            $dumpfile(fa_dump_vcd_path);
+            if (fa_dump_vcd_depth == 1)
+                $dumpvars(1, dut);
+            else if (fa_dump_vcd_depth == 2)
+                $dumpvars(2, dut);
+            else
+                $dumpvars(0, dut);
+        end
+    end
 
     // AXI4-Lite
     logic [7:0]  s_axil_awaddr, s_axil_araddr;
@@ -108,6 +137,15 @@ module system_tb;
         @(posedge clk); s_axil_rready = 0;
     endtask
 
+    task automatic mem_write16(input [63:0] addr, input [15:0] data);
+        @(negedge clk);
+        mem_wr_en     = 1'b1;
+        mem_wr_addr   = addr;
+        mem_wr_data16 = data;
+        @(negedge clk);
+        mem_wr_en     = 1'b0;
+    endtask
+
     // ========== Test ==========
     localparam [63:0] Q_BASE = 64'h0001_0000;
     localparam [63:0] K_BASE = 64'h0002_0000;
@@ -154,12 +192,19 @@ module system_tb;
     endtask
 
     integer i, j;
+    localparam real MEAN_LIMIT = 0.03;
+    localparam real MAX_LIMIT = 0.10;
+    localparam real CAUSAL_ROW0_LIMIT = 0.02;
+
     reg [31:0] status_val, cycles_val;
+    reg [31:0] rd_bytes_val, wr_bytes_val;
     integer timeout_cnt;
     shortint q_raw, k_raw, v_raw;
     real mean_err, max_err, abs_err, dut_val, gold_val;
+    real row0_causal_err, row0_abs_err;
     integer err_count;
     shortint o_val;
+    bit test_pass;
 
     initial begin
         s_axil_awaddr = 0; s_axil_awvalid = 0;
@@ -184,15 +229,9 @@ module system_tb;
                 q_f[i][j] = $itor(q_raw) / 256.0;
                 k_f[i][j] = $itor(k_raw) / 256.0;
                 v_f[i][j] = $itor(v_raw) / 256.0;
-                // Write to memory model
-                @(posedge clk);
-                mem_wr_en = 1; mem_wr_addr = Q_BASE + (i*64+j)*2; mem_wr_data16 = q_raw;
-                @(posedge clk);
-                mem_wr_addr = K_BASE + (i*64+j)*2; mem_wr_data16 = k_raw;
-                @(posedge clk);
-                mem_wr_addr = V_BASE + (i*64+j)*2; mem_wr_data16 = v_raw;
-                @(posedge clk);
-                mem_wr_en = 0;
+                mem_write16(Q_BASE + (i*64+j)*2, q_raw);
+                mem_write16(K_BASE + (i*64+j)*2, k_raw);
+                mem_write16(V_BASE + (i*64+j)*2, v_raw);
             end
         end
         $display("  Data loaded");
@@ -222,25 +261,6 @@ module system_tb;
         $display("[4] Starting...");
         axil_write(8'h00, 32'h0000_0001);
 
-        // Debug: monitor compute
-        fork
-            begin
-                integer dbg_i;
-                for (dbg_i = 0; dbg_i < 10000; dbg_i = dbg_i + 1) begin
-                    @(posedge clk);
-                    if (dut.tc_compute_start)
-                        $display("  DBG: compute_start at +%0d", dbg_i);
-                    if (dut.tc_compute_done)
-                        $display("  DBG: compute_done at +%0d", dbg_i);
-                end
-                $display("  DBG@%0d: tc=%0d wr_req=%b wr_done=%b dma_wr=%0d axm_wr=%0d awV=%b wV=%b wR=%b",
-                    dbg_i, dut.u_tile_ctrl.state,
-                    dut.tc_dma_wr_req, dut.tc_dma_wr_done,
-                    dut.u_dma.wr_state, dut.u_dma.u_axi_master.wr_state,
-                    m_axi_awvalid, m_axi_wvalid, m_axi_wready);
-            end
-        join_none
-
         // Step 5: Wait for DONE
         $display("[5] Polling DONE...");
         timeout_cnt = 0;
@@ -266,11 +286,13 @@ module system_tb;
         end
 
         axil_read(8'h40, cycles_val);
+        axil_read(8'h44, rd_bytes_val);
+        axil_read(8'h48, wr_bytes_val);
         $display("  DONE! Cycles: %0d", cycles_val);
 
         // Step 6: Read O from external memory (full 256 rows via DMA write-back)
         $display("[6] Reading O from memory (full 256x64)...");
-        mean_err = 0; max_err = 0; err_count = 0;
+        mean_err = 0; max_err = 0; err_count = 0; row0_causal_err = 0;
         for (i = 0; i < 256; i = i + 1) begin
             for (j = 0; j < 64; j = j + 1) begin
                 mem_rd_en = 1;
@@ -286,6 +308,11 @@ module system_tb;
                 if (abs_err < 0) abs_err = -abs_err;
                 mean_err = mean_err + abs_err;
                 if (abs_err > max_err) max_err = abs_err;
+                if (i == 0) begin
+                    row0_abs_err = dut_val - v_f[0][j];
+                    if (row0_abs_err < 0) row0_abs_err = -row0_abs_err;
+                    if (row0_abs_err > row0_causal_err) row0_causal_err = row0_abs_err;
+                end
                 err_count = err_count + 1;
             end
         end
@@ -294,21 +321,51 @@ module system_tb;
         $display("============================================================");
         $display("  RESULTS");
         $display("  Cycles:         %0d", cycles_val);
+        $display("  RD_BYTES:       %0d", rd_bytes_val);
+        $display("  WR_BYTES:       %0d", wr_bytes_val);
         $display("  mean_abs_error: %.6f", mean_err);
         $display("  max_abs_error:  %.6f", max_err);
+        $display("  row0_causal:    %.6f", row0_causal_err);
         $display("============================================================");
+        test_pass = 1'b1;
         if (cycles_val < 300000)
             $display("  Cycles:  PASS (%0d < 300k)", cycles_val);
-        else
+        else begin
             $display("  Cycles:  FAIL (%0d >= 300k)", cycles_val);
-        if (mean_err < 0.5)
+            test_pass = 1'b0;
+        end
+        if (mean_err <= MEAN_LIMIT)
             $display("  Mean:    PASS (%.6f)", mean_err);
-        else
+        else begin
             $display("  Mean:    FAIL (%.6f)", mean_err);
-        if (max_err < 2.0)
+            test_pass = 1'b0;
+        end
+        if (max_err <= MAX_LIMIT)
             $display("  Max:     PASS (%.6f)", max_err);
-        else
+        else begin
             $display("  Max:     FAIL (%.6f)", max_err);
+            test_pass = 1'b0;
+        end
+        if (row0_causal_err <= CAUSAL_ROW0_LIMIT)
+            $display("  Causal:  PASS (row0 max err %.6f)", row0_causal_err);
+        else begin
+            $display("  Causal:  FAIL (row0 max err %.6f)", row0_causal_err);
+            test_pass = 1'b0;
+        end
+        if (rd_bytes_val == 32'd2260992)
+            $display("  RD_BYTES: PASS (%0d)", rd_bytes_val);
+        else begin
+            $display("  RD_BYTES: FAIL (%0d != 2260992)", rd_bytes_val);
+            test_pass = 1'b0;
+        end
+        if (wr_bytes_val == 32'd32768)
+            $display("  WR_BYTES: PASS (%0d)", wr_bytes_val);
+        else begin
+            $display("  WR_BYTES: FAIL (%0d != 32768)", wr_bytes_val);
+            test_pass = 1'b0;
+        end
+        if (!test_pass)
+            $fatal(1, "FlashAttention system test failed");
         $display(">>> ALL TESTS PASSED <<<");
         $finish;
     end

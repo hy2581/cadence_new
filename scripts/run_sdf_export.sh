@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run Design Compiler 2025 with the project-local Tcl flow.
+# Export DDC/SDF/SPEF-style artifacts from an existing synthesized netlist.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,31 +15,31 @@ if [ -f "${SCRIPT_DIR}/sky130_env.sh" ]; then
     source "${SCRIPT_DIR}/sky130_env.sh"
 fi
 
-if [ -z "${DC_TARGET_LIB:-}" ] && [ "${DC_ENABLE_TSMC12_FALLBACK:-0}" = "1" ] && [ -f "${SCRIPT_DIR}/tsmc12_env.sh" ]; then
-    # shellcheck source=/dev/null
-    source "${SCRIPT_DIR}/tsmc12_env.sh"
-fi
-
 DC_BIN="${DC_BIN:-$(command -v dc_shell || true)}"
 if [ -z "${DC_BIN}" ]; then
     echo "ERROR: dc_shell was not found. Source scripts/synopsys2025_env.sh or set DC_BIN." >&2
     exit 2
 fi
 
+TAG="${SDF_EXPORT_TAG:-$(date +%Y%m%d_%H%M%S)}"
 export PROJECT_ROOT
-export DC_OUT_DIR="${DC_OUT_DIR:-${PROJECT_ROOT}/build/dc}"
-mkdir -p "${DC_OUT_DIR}"
+export SDF_EXPORT_OUT_DIR="${SDF_EXPORT_OUT_DIR:-${PROJECT_ROOT}/build/dc_sdf_export_${TAG}}"
+export SDF_EXPORT_NETLIST="${SDF_EXPORT_NETLIST:-${PROJECT_ROOT}/build/dc_quality_lint_timing_20260518_1523/netlist/fa_top_netlist.v}"
+export SDF_EXPORT_SDC="${SDF_EXPORT_SDC:-${PROJECT_ROOT}/build/dc_quality_lint_timing_20260518_1523/netlist/fa_top.sdc}"
 
-LOG_FILE="${DC_LOG_FILE:-${DC_OUT_DIR}/dc_shell.log}"
+mkdir -p "${SDF_EXPORT_OUT_DIR}"
+LOG_FILE="${SDF_EXPORT_LOG_FILE:-${SDF_EXPORT_OUT_DIR}/dc_sdf_export.log}"
 
 echo "================================================"
-echo " FlashAttention synthesis - DC 2025"
+echo " FlashAttention SDF export - DC 2025"
 echo "================================================"
 echo "Project : ${PROJECT_ROOT}"
-echo "Output  : ${DC_OUT_DIR}"
+echo "Output  : ${SDF_EXPORT_OUT_DIR}"
+echo "Netlist : ${SDF_EXPORT_NETLIST}"
+echo "SDC     : ${SDF_EXPORT_SDC}"
 echo "DC      : ${DC_BIN}"
 echo "Library : ${DC_TARGET_LIB:-<not set>}"
 echo "Log     : ${LOG_FILE}"
 echo ""
 
-"${DC_BIN}" -f "${SCRIPT_DIR}/run_dc.tcl" 2>&1 | tee "${LOG_FILE}"
+"${DC_BIN}" -f "${SCRIPT_DIR}/run_sdf_export.tcl" 2>&1 | tee "${LOG_FILE}"

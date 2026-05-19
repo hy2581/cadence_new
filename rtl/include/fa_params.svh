@@ -50,6 +50,8 @@ parameter REG_STRIDE_BYTES = 8'h34;
 parameter REG_NEG_LARGE    = 8'h38;
 parameter REG_SCALE        = 8'h3C;
 parameter REG_CYCLES       = 8'h40;
+parameter REG_RD_BYTES     = 8'h44;
+parameter REG_WR_BYTES     = 8'h48;
 
 // --- CTRL register bits ---
 parameter CTRL_START      = 0;
@@ -70,10 +72,10 @@ parameter DEFAULT_NEG_LARGE = 16'h8000;             // -128.0 in Q8.8
 parameter DEFAULT_SCALE   = 16'h0020;               // 1/8 ≈ 1/√64 in Q8.8
 
 // --- Parallelism ---
-parameter PAR_MACS       = 8;     // parallel MACs per dot-product per cycle
+parameter PAR_MACS       = 1;     // parallel MACs per dot-product per cycle
 
 // --- Exp LUT ---
-parameter EXP_LUT_DEPTH  = 256;
-parameter EXP_LUT_WIDTH  = 16;
+parameter EXP_LUT_DEPTH  = 1024;
+parameter EXP_LUT_WIDTH  = 24;
 
 `endif

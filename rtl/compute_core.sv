@@ -25,8 +25,8 @@ module compute_core #(
     output logic                          busy,
 
     // Tile indices for causal mask
-    input  logic [$clog2(SEQ_LEN)-1:0]   q_tile_idx,
-    input  logic [$clog2(SEQ_LEN)-1:0]   kv_tile_idx,
+    input  logic [$clog2(SEQ_LEN/TILE_BR)-1:0] q_tile_idx,
+    input  logic [$clog2(SEQ_LEN/TILE_BC)-1:0] kv_tile_idx,
 
     // Configuration
     input  logic                          causal_en,
@@ -54,7 +54,11 @@ module compute_core #(
 );
 
     localparam IDX_W = $clog2(SEQ_LEN);
+    localparam Q_TILE_IDX_W = $clog2(SEQ_LEN / TILE_BR);
+    localparam KV_TILE_IDX_W = $clog2(SEQ_LEN / TILE_BC);
     localparam NUM_STEPS = HEAD_DIM / PAR_MACS;
+    localparam INPUT_FRAC_BITS = 8;
+    localparam SCORE_FRAC_SHIFT = FRAC_BITS - INPUT_FRAC_BITS;
 
     // State machine
     typedef enum logic [2:0] {
@@ -88,6 +92,10 @@ module compute_core #(
 
     // Masked scores
     logic signed [ACC_WIDTH-1:0] masked_scores [TILE_BR-1:0][TILE_BC-1:0];
+    logic signed [ACC_WIDTH-1:0] neg_large_score;
+
+    assign neg_large_score =
+        $signed({{(ACC_WIDTH-16){neg_large[15]}}, neg_large}) <<< SCORE_FRAC_SHIFT;
 
     // Online softmax signals
     logic sm_start, sm_done, sm_busy;
@@ -96,7 +104,7 @@ module compute_core #(
     logic signed [ACC_WIDTH-1:0] m_new [TILE_BR-1:0];
     logic [ACC_WIDTH-1:0]        l_new [TILE_BR-1:0];
     logic [EXP_WIDTH-1:0]        p_matrix [TILE_BR-1:0][TILE_BC-1:0];
-    logic [ACC_WIDTH-1:0]        rescale_vals [TILE_BR-1:0];
+    logic [EXP_WIDTH-1:0]        rescale_vals [TILE_BR-1:0];
     logic                        sm_valid;
 
     online_softmax_unit #(
@@ -105,7 +113,7 @@ module compute_core #(
     ) u_softmax (
         .clk(clk), .rst_n(rst_n),
         .start(sm_start), .first_tile(first_kv_tile), .done(sm_done), .busy(sm_busy),
-        .scores(masked_scores), .neg_large(neg_large),
+        .scores(masked_scores),
         .m_old(m_old), .l_old(l_old),
         .m_new(m_new), .l_new(l_new),
         .p_matrix(p_matrix), .rescale(rescale_vals), .results_valid(sm_valid)
@@ -115,6 +123,8 @@ module compute_core #(
     logic oa_start, oa_done, oa_busy;
     logic oa_v_valid;
     logic [$clog2(NUM_STEPS):0] oa_v_step;
+    logic v_rd_pending;
+    logic signed [DATA_WIDTH-1:0] oa_v_data [TILE_BC-1:0][PAR_MACS-1:0];
 
     output_accumulator #(
         .TILE_BR(TILE_BR), .TILE_BC(TILE_BC), .HEAD_DIM(HEAD_DIM),
@@ -125,7 +135,7 @@ module compute_core #(
         .start(oa_start), .first_tile(first_kv_tile), .last_tile(last_kv_tile),
         .done(oa_done), .busy(oa_busy),
         .p_matrix(p_matrix),
-        .v_data(v_data), .v_valid(oa_v_valid),
+        .v_data(oa_v_data), .v_valid(oa_v_valid),
         .rescale(rescale_vals), .l_values(l_new),
         .o_out(o_tile), .o_valid(o_valid)
     );
@@ -166,6 +176,7 @@ module compute_core #(
             v_rd_en   <= 1'b0;
             oa_v_valid <= 1'b0;
             oa_v_step <= '0;
+            v_rd_pending <= 1'b0;
         end else begin
             done     <= 1'b0;
             dp_start <= 1'b0;
@@ -175,7 +186,13 @@ module compute_core #(
             q_rd_en  <= 1'b0;
             k_rd_en  <= 1'b0;
             v_rd_en  <= 1'b0;
-            oa_v_valid <= 1'b0;
+            oa_v_valid <= v_rd_pending;
+            v_rd_pending <= 1'b0;
+            if (v_rd_pending) begin
+                for (int r = 0; r < TILE_BC; r++)
+                    for (int p = 0; p < PAR_MACS; p++)
+                        oa_v_data[r][p] <= v_data[r][p];
+            end
 
             case (state)
                 S_IDLE: begin
@@ -188,7 +205,7 @@ module compute_core #(
                 end
 
                 S_DOT_PRODUCT: begin
-                    if (!dp_done && dp_busy) begin
+                    if (!dp_done && dp_busy && (dp_step < NUM_STEPS)) begin
                         // Stream Q and K data to dot-product unit
                         q_rd_en <= 1'b1;
                         k_rd_en <= 1'b1;
@@ -208,13 +225,15 @@ module compute_core #(
                         for (int c = 0; c < TILE_BC; c++) begin
                             logic mask_bit;
                             logic [IDX_W-1:0] abs_row, abs_col;
-                            abs_row = q_tile_idx * TILE_BR + IDX_W'(r);
-                            abs_col = kv_tile_idx * TILE_BC + IDX_W'(c);
+                            logic signed [ACC_WIDTH-1:0] score_next;
+                            abs_row = IDX_W'(q_tile_idx) * TILE_BR + IDX_W'(r);
+                            abs_col = IDX_W'(kv_tile_idx) * TILE_BC + IDX_W'(c);
                             mask_bit = causal_en & (abs_col > abs_row);
                             if (mask_bit)
-                                masked_scores[r][c] <= {{(ACC_WIDTH-16){neg_large[15]}}, neg_large};
+                                score_next = neg_large_score;
                             else
-                                masked_scores[r][c] <= dp_scores[r][c];
+                                score_next = dp_scores[r][c];
+                            masked_scores[r][c] <= score_next;
                         end
                     end
                     state    <= S_SOFTMAX;
@@ -226,14 +245,15 @@ module compute_core #(
                         state    <= S_ACCUMULATE;
                         oa_start <= 1'b1;
                         oa_v_step <= '0;
+                        v_rd_pending <= 1'b0;
                     end
                 end
 
                 S_ACCUMULATE: begin
-                    if (oa_busy && !oa_done) begin
+                    if (oa_busy && !oa_done && (oa_v_step < NUM_STEPS)) begin
                         v_rd_en    <= 1'b1;
                         v_rd_step  <= oa_v_step[$clog2(NUM_STEPS)-1:0];
-                        oa_v_valid <= 1'b1;
+                        v_rd_pending <= 1'b1;
                         oa_v_step  <= oa_v_step + 1;
                     end
                     if (oa_done) begin

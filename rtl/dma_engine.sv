@@ -76,10 +76,7 @@ module dma_engine #(
     output logic                       buf_o_rd_en,
     output logic [$clog2(TILE_BR)-1:0] buf_o_rd_row,
     output logic [$clog2(HEAD_DIM/(AXI_DATA_WIDTH/DATA_WIDTH))-1:0] buf_o_rd_col_grp,
-    input  logic [AXI_DATA_WIDTH-1:0]  buf_o_rd_data,
-
-    // Buffer sel
-    input  logic                       kv_buf_sel
+    input  logic [AXI_DATA_WIDTH-1:0]  buf_o_rd_data
 );
 
     localparam ELEMS_PER_BEAT = AXI_DATA_WIDTH / DATA_WIDTH;
@@ -126,12 +123,14 @@ module dma_engine #(
     // --- Read data routing ---
     logic [1:0]  rd_target_reg;
     logic [15:0] rd_beat_cnt;
+    logic        rd_active;
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             axi_rd_req    <= 1'b0;
             rd_target_reg <= '0;
             rd_beat_cnt   <= '0;
+            rd_active     <= 1'b0;
             dma_rd_done   <= 1'b0;
             buf_q_wr_en   <= 1'b0;
             buf_k_wr_en   <= 1'b0;
@@ -141,17 +140,19 @@ module dma_engine #(
             buf_q_wr_en <= 1'b0;
             buf_k_wr_en <= 1'b0;
             buf_v_wr_en <= 1'b0;
+            axi_rd_req  <= 1'b0;
 
-            // Capture DMA read request and hold axi_rd_req until done
-            if (dma_rd_req && !axi_rd_req) begin
+            // Capture one DMA read request and issue a one-cycle AXI start pulse.
+            if (axi_rd_done) begin
+                rd_active   <= 1'b0;
+                dma_rd_done <= 1'b1;
+            end else if (dma_rd_req && !rd_active) begin
                 axi_rd_req    <= 1'b1;
                 axi_rd_addr   <= dma_rd_addr;
                 axi_rd_len    <= dma_rd_len_bytes;
                 rd_target_reg <= dma_rd_target;
                 rd_beat_cnt   <= '0;
-            end
-            if (axi_rd_done) begin
-                axi_rd_req <= 1'b0;
+                rd_active     <= 1'b1;
             end
 
             if (axi_rd_data_valid) begin
@@ -175,23 +176,18 @@ module dma_engine #(
                 endcase
                 rd_beat_cnt <= rd_beat_cnt + 1;
             end
-
-            if (axi_rd_done)
-                dma_rd_done <= 1'b1;
         end
     end
 
     // --- Write data routing (O buffer → AXI) ---
-    // Simplified: just signal done immediately (O data already in buffer)
-    // For proper operation, we'd need to stream buffer contents through AXI.
-    // Simplified approach: mark write done after a fixed delay to allow
-    // the top-level FSM to proceed. Full AXI write implementation TBD.
+    // Streams each beat from the O tile buffer into the AXI write channel.
     localparam O_COLS_PER_BEAT = AXI_DATA_WIDTH / DATA_WIDTH;
     localparam O_BEATS_PER_ROW = HEAD_DIM / O_COLS_PER_BEAT;
     localparam O_TOTAL_BEATS = TILE_BR * O_BEATS_PER_ROW;
 
     logic [15:0] wr_beat_cnt;
     logic        wr_active;
+    logic        wr_req_seen;
 
     typedef enum logic [1:0] { WR_IDLE, WR_ADDR, WR_DATA, WR_FINISH } wr_state_t;
     wr_state_t wr_state;
@@ -203,6 +199,7 @@ module dma_engine #(
             dma_wr_done       <= 1'b0;
             wr_beat_cnt       <= '0;
             wr_active         <= 1'b0;
+            wr_req_seen       <= 1'b0;
             axi_wr_data_valid <= 1'b0;
             axi_wr_data       <= '0;
             buf_o_rd_en       <= 1'b0;
@@ -213,16 +210,20 @@ module dma_engine #(
 
             case (wr_state)
                 WR_IDLE: begin
-                    if (dma_wr_req) begin
+                    if (!dma_wr_req)
+                        wr_req_seen <= 1'b0;
+                    if (dma_wr_req && !wr_req_seen) begin
                         axi_wr_req  <= 1'b1;
                         axi_wr_addr <= dma_wr_addr;
                         axi_wr_len  <= dma_wr_len_bytes;
                         wr_beat_cnt <= '0;
+                        wr_req_seen <= 1'b1;
                         wr_state    <= WR_ADDR;
                     end
                 end
 
                 WR_ADDR: begin
+                    axi_wr_req       <= 1'b0;
                     // Setup first read address
                     buf_o_rd_en      <= 1'b1;
                     buf_o_rd_row     <= '0;

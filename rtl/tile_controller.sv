@@ -25,6 +25,7 @@ module tile_controller #(
     input  logic [AXI_ADDR_WIDTH-1:0]     v_base_addr,
     input  logic [AXI_ADDR_WIDTH-1:0]     o_base_addr,
     input  logic [31:0]                   stride_bytes,
+    input  logic                          causal_en,
 
     // DMA request interface
     output logic                          dma_rd_req,
@@ -45,19 +46,17 @@ module tile_controller #(
     input  logic                          compute_done,
 
     // Tile indices (for causal mask)
-    output logic [$clog2(SEQ_LEN)-1:0]   q_tile_idx,
-    output logic [$clog2(SEQ_LEN)-1:0]   kv_tile_idx,
+    output logic [$clog2(SEQ_LEN/TILE_BR)-1:0] q_tile_idx,
+    output logic [$clog2(SEQ_LEN/TILE_BC)-1:0] kv_tile_idx,
 
     // Buffer sel for ping-pong
-    output logic                          kv_buf_sel,
-
-    // O write-back trigger
-    output logic                          o_writeback_start,
-    input  logic                          o_writeback_done
+    output logic                          kv_buf_sel
 );
 
     localparam NUM_Q_TILES  = SEQ_LEN / TILE_BR;
     localparam NUM_KV_TILES = SEQ_LEN / TILE_BC;
+    localparam Q_TILE_IDX_W = $clog2(NUM_Q_TILES);
+    localparam KV_TILE_IDX_W = $clog2(NUM_KV_TILES);
     localparam Q_TILE_BYTES = TILE_BR * HEAD_DIM * (DATA_WIDTH / 8);
     localparam KV_TILE_BYTES = TILE_BC * HEAD_DIM * (DATA_WIDTH / 8);
     localparam O_TILE_BYTES = TILE_BR * HEAD_DIM * (DATA_WIDTH / 8);
@@ -78,11 +77,15 @@ module tile_controller #(
     } state_t;
 
     state_t state;
-    logic [$clog2(NUM_Q_TILES):0]  q_idx;
-    logic [$clog2(NUM_KV_TILES):0] kv_idx;
+    logic [Q_TILE_IDX_W:0]         q_idx;
+    logic [KV_TILE_IDX_W:0]        kv_idx;
+    logic [$clog2(SEQ_LEN):0]      q_tile_last_row;
+    logic [$clog2(NUM_KV_TILES):0] max_kv_idx;
 
-    assign q_tile_idx  = q_idx;
-    assign kv_tile_idx = kv_idx;
+    assign q_tile_idx  = q_idx[Q_TILE_IDX_W-1:0];
+    assign kv_tile_idx = kv_idx[KV_TILE_IDX_W-1:0];
+    assign q_tile_last_row = q_idx * TILE_BR + (TILE_BR - 1);
+    assign max_kv_idx = causal_en ? (q_tile_last_row / TILE_BC) : (NUM_KV_TILES - 1);
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -97,11 +100,9 @@ module tile_controller #(
             compute_start      <= 1'b0;
             compute_first_kv   <= 1'b0;
             compute_last_kv    <= 1'b0;
-            o_writeback_start  <= 1'b0;
         end else begin
             all_done          <= 1'b0;
             compute_start     <= 1'b0;
-            o_writeback_start <= 1'b0;
 
             case (state)
                 ST_IDLE: begin
@@ -157,7 +158,7 @@ module tile_controller #(
                     if (dma_rd_done) begin
                         compute_start    <= 1'b1;
                         compute_first_kv <= (kv_idx == 0);
-                        compute_last_kv  <= (kv_idx == NUM_KV_TILES - 1);
+                        compute_last_kv  <= (kv_idx == max_kv_idx);
                         state            <= ST_WAIT_COMPUTE;
                     end
                 end
@@ -169,7 +170,7 @@ module tile_controller #(
                 end
 
                 ST_NEXT_KV: begin
-                    if (kv_idx == NUM_KV_TILES - 1) begin
+                    if (kv_idx == max_kv_idx) begin
                         state <= ST_WRITE_O;
                     end else begin
                         kv_idx     <= kv_idx + 1;
@@ -182,7 +183,6 @@ module tile_controller #(
                     dma_wr_req       <= 1'b1;
                     dma_wr_addr      <= o_base_addr + AXI_ADDR_WIDTH'(q_idx) * AXI_ADDR_WIDTH'(stride_bytes) * TILE_BR;
                     dma_wr_len_bytes <= O_TILE_BYTES;
-                    o_writeback_start <= 1'b1;
                     state            <= ST_WAIT_O;
                 end
 
