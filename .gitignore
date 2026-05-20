@@ -13,3 +13,14 @@
 /inter.vpd
 /novas.*
 /default.svf
+
+# Local/generated study material and extracted contest text
+/learning_notes/
+/cadence_contest_doc_extracted.txt
+/cadence_contest_doc_rawtext.txt
+/contest_doc_extracted.txt
+
+# Remote/generated run evidence
+/remote_codex_jobs/
+/RUN/
+/alib-*/
