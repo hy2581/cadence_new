@@ -7,8 +7,8 @@ Last updated: 2026-05-20.
 - RTL: `rtl/*.sv`, `rtl/axis_stream_bridge.sv`, and `rtl/include/fa_params.svh`.
 - Constraints: `constraints/flash_attention.sdc`.
 - Verification TBs: `tb/unit_tb/system_tb.sv`, `tb/unit_tb/axi4_slave_mem.sv`, `tb/verification/fa_verification_tb.sv`, `tb/verification/fa_axi_vip_lite.sv`, `tb/uvm/fa_uvm_if.sv`, `tb/uvm/fa_uvm_pkg.sv`, `tb/uvm/fa_uvm_tb.sv`.
-- Verification plan: `tb/verification/verification_plan.md`.
-- Run scripts: `scripts/run_system_tb.sh`, `scripts/run_verification_suite.sh`, `scripts/run_uvm_verification.sh`, `scripts/run_uvm_bonus.sh`, `scripts/run_uvm_bonus_full.sh`, `scripts/run_dc.sh`, `scripts/run_dc.tcl`, `scripts/run_post_synth_sim.sh`, `scripts/normalize_sky130_sdf.py`, `scripts/run_sdf_export.sh`, `scripts/run_sdf_export.tcl`, `scripts/run_power_activity.sh`, `scripts/run_power_activity.tcl`, `scripts/sky130_env.sh`, `scripts/synopsys2025_env.sh`.
+- Verification plan: `tb/verification/verification_plan.md`, `tb/verification/uvm_signoff_flow.md`.
+- Run scripts: `scripts/run_system_tb.sh`, `scripts/run_verification_suite.sh`, `scripts/run_uvm_verification.sh`, `scripts/run_uvm_bonus.sh`, `scripts/run_uvm_bonus_full.sh`, `scripts/run_uvm_signoff.sh`, `scripts/run_dc.sh`, `scripts/run_dc.tcl`, `scripts/run_post_synth_sim.sh`, `scripts/normalize_sky130_sdf.py`, `scripts/run_sdf_export.sh`, `scripts/run_sdf_export.tcl`, `scripts/run_power_activity.sh`, `scripts/run_power_activity.tcl`, `scripts/sky130_env.sh`, `scripts/synopsys2025_env.sh`.
 
 ## Verification Evidence
 
@@ -27,6 +27,7 @@ Last updated: 2026-05-20.
 - Latest bonus S=512 UVM PASS: `remote_codex_jobs/bonus_full_uvm_20260520_013839/artifacts/vcs_uvm_bonus_full_final/fa_uvm_seq512_test/sim.log`.
 - Latest post-bonus system TB PASS: `remote_codex_jobs/bonus_full_uvm_20260520_013839/artifacts/vcs_system_tb_after_synth_fix/sim.log`.
 - Latest post-bonus DC analyze/elaborate/check_design: `remote_codex_jobs/bonus_full_uvm_20260520_013839/artifacts/dc_check_only_after_fix/reports/dc_check_design.rpt`.
+- Repeatable UVM signoff entry point: `scripts/run_uvm_signoff.sh`; flow and pass/fail rules: `tb/verification/uvm_signoff_flow.md`.
 - UVM coverage dashboard: `build/vcs_uvm_verification/coverage_report/dashboard.txt`.
 - Existing enhanced non-UVM preservation PASS after UVM addition: `build/vcs_uvm_preserve_verification_suite/sim.log`.
 - Post-completion polish verification PASS: `build/vcs_post_completion_polish/sim.log`.

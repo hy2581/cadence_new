@@ -96,6 +96,8 @@ UVM source and runner:
 - `tb/uvm/fa_uvm_pkg.sv`
 - `tb/uvm/fa_uvm_tb.sv`
 - `scripts/run_uvm_verification.sh`
+- `scripts/run_uvm_signoff.sh`
+- `tb/verification/uvm_signoff_flow.md`
 
 The UVM environment uses local UVM VIP-lite protocol checking, not commercial
 AXI VIP. It contains AXI4-Lite and AXI4 master interfaces, an active AXI4-Lite
@@ -127,6 +129,12 @@ UVM coverage dashboard summary:
 SCORE  LINE   COND   TOGGLE FSM    BRANCH GROUP
  58.90  44.52  87.88  33.12  62.50  25.37 100.00
 ```
+
+The repeatable UVM signoff flow is documented in
+`tb/verification/uvm_signoff_flow.md` and wrapped by
+`scripts/run_uvm_signoff.sh`. It runs syntax preflight, baseline UVM with
+coverage, and the full bonus regression including the `SEQ_LEN=512` compile
+variant.
 
 Existing enhanced non-UVM preservation run after adding the UVM environment:
 `/home/hy258/cadence_new/build/vcs_uvm_preserve_verification_suite/sim.log`

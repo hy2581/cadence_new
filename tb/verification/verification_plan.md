@@ -8,6 +8,7 @@ verification environment for contest problem 2.
 | Area | Goal | Implementation | Evidence |
 |---|---|---|---|
 | Verification points | Define planned checks for registers, DMA, AXI, function, performance, exceptions, and coverage | This file | `tb/verification/verification_plan.md` |
+| UVM signoff flow | Provide the repeatable baseline-plus-bonus verification entry point and pass/fail rules | Signoff runbook and wrapper script | `tb/verification/uvm_signoff_flow.md`, `scripts/run_uvm_signoff.sh` |
 | Full UVM environment | Meet the contest requirement for a SystemVerilog+UVM verification environment | UVM interfaces, agents, sequences, scoreboard, coverage, env, and tests under `tb/uvm/` | `tb/uvm/fa_uvm_if.sv`, `tb/uvm/fa_uvm_pkg.sv`, `tb/uvm/fa_uvm_tb.sv`, `scripts/run_uvm_verification.sh` |
 | AXI VIP | Check AXI4-Lite and AXI4 Master key protocol behavior | Lightweight VIP-lite monitors because no commercial AXI VIP was found under the available `/eda` Synopsys/Cadence paths | `tb/verification/fa_axi_vip_lite.sv` |
 | UVM AXI VIP-lite | Integrate local protocol checking into UVM without commercial AXI VIP dependency | UVM AXI4-Lite active agent monitor and AXI master passive DMA monitor/checker | `tb/uvm/fa_uvm_pkg.sv` |
@@ -66,6 +67,10 @@ Latest passing UVM bonus evidence:
 - Full bonus suite: `remote_codex_jobs/bonus_full_uvm_20260520_013839/artifacts/vcs_uvm_bonus_full_final/*/sim.log`, covering baseline UVM, padding, multi-head, task queue, BF16/FP16, Q6.10/Q4.12, INT8 Q4.4, FP8 E4M3, deterministic dropout, AXI4-Stream smoke, and the compile-time S=512 bounded variant.
 - Every final bonus-suite log reports UVM warnings/errors/fatals `0/0/0`.
 - Post-bonus system TB: `remote_codex_jobs/bonus_full_uvm_20260520_013839/artifacts/vcs_system_tb_after_synth_fix/sim.log`, `>>> ALL TESTS PASSED <<<`.
+
+The repeatable release entry point is `scripts/run_uvm_signoff.sh`; the exact
+flow, pass criteria, and feature-scope caveats are documented in
+`tb/verification/uvm_signoff_flow.md`.
 
 ## Contest-2 Bonus Matrix
 
